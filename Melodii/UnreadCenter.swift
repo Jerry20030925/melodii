@@ -2,11 +2,11 @@
 //  UnreadCenter.swift
 //  Melodii
 //
-//  Created by Assistant on 31/10/2025.
+//  全局未读中心：通知/消息未读计数
 //
 
 import Foundation
-import Observation
+import Combine
 
 @MainActor
 final class UnreadCenter: ObservableObject {
@@ -22,21 +22,15 @@ final class UnreadCenter: ObservableObject {
         unreadMessages = 0
     }
 
-    // Notifications
-    func incrementNotifications(by delta: Int = 1) {
-        unreadNotifications = max(0, unreadNotifications + delta)
+    func incrementNotifications() {
+        unreadNotifications = max(0, unreadNotifications + 1)
     }
 
-    func decrementNotifications(by delta: Int = 1) {
-        unreadNotifications = max(0, unreadNotifications - delta)
+    func incrementMessages() {
+        unreadMessages = max(0, unreadMessages + 1)
     }
 
-    // Messages
-    func incrementMessages(by delta: Int = 1) {
-        unreadMessages = max(0, unreadMessages + delta)
-    }
-
-    func decrementMessages(by delta: Int = 1) {
-        unreadMessages = max(0, unreadMessages - delta)
+    func decrementMessages(_ count: Int = 1) {
+        unreadMessages = max(0, unreadMessages - count)
     }
 }

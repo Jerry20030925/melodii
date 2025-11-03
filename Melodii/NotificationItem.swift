@@ -58,7 +58,7 @@ struct NotificationRowView: View {
                     .foregroundStyle(.primary)
                     .lineLimit(2)
 
-                Text(notification.createdAt.timeAgoDisplay)
+                Text(notification.createdAt.timeAgoDisplayShort)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -75,9 +75,9 @@ struct NotificationRowView: View {
     }
 }
 
-// Simple relative time helper if you don't already have one elsewhere
+// Simple relative time helper (renamed to avoid duplicate)
 private extension Date {
-    var timeAgoDisplay: String {
+    var timeAgoDisplayShort: String {
         let seconds = Int(Date().timeIntervalSince(self))
         if seconds < 60 { return "刚刚" }
         let minutes = seconds / 60

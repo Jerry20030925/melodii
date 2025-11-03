@@ -2,179 +2,233 @@
 //  RealtimeService.swift
 //  Melodii
 //
-//  Created by Assistant on 31/10/2025.
+//  统一的 Realtime 订阅中心：通知、消息、会话内消息
 //
 
 import Foundation
 import Supabase
+import Combine
 
 @MainActor
 final class RealtimeService: ObservableObject {
     static let shared = RealtimeService()
 
+    // 对外发布的新消息（供视图用 onReceive(realtimeService.$newMessage) 监听）
+    @Published var newMessage: Message?
+
     private let client = SupabaseConfig.client
-    private var notificationChannel: RealtimeChannel?
-    private var conversationChannel: RealtimeChannel?
-    private var messageChannels: [String: RealtimeChannel] = [:]
+
+    private var notificationChannel: RealtimeChannelV2?
+    private var messagesChannel: RealtimeChannelV2?
+    private var conversationChannels: [String: RealtimeChannelV2] = [:]
+
+    // 会话列表全局订阅通道（用于 Conversations/消息列表页面）
+    private var conversationsChannel: RealtimeChannelV2?
+
+    // 当前连接的用户ID（用于管理 connect/disconnect）
+    private var currentUserId: String?
 
     private init() {}
 
-    // MARK: - Lifecycle
+    // MARK: - High-level lifecycle
 
+    /// 统一启动：根据用户ID启动所需的实时订阅
     func connect(userId: String) async {
-        // Supabase Swift 客户端会在首次使用时自动管理 socket 连接
-        // 这里保留占位，便于未来扩展心跳与网络状态监听
-        print("🔌 RealtimeService ready for user: \(userId)")
+        currentUserId = userId
+
+        // 会话列表全局监听（用于消息页联动）
+        await subscribeToConversations(userId: userId) { _ in
+            // 这里无需额外处理，视图会通过 $newMessage 或自身回调更新
+        }
+
+        // 如需默认同时启动“全局消息监听”或“通知监听”，可取消注释：
+        // await subscribeToMessages(userId: userId) { _ in }
+        // await subscribeToNotifications(userId: userId) { _ in }
     }
 
+    /// 统一断开：取消所有实时订阅并清理状态
     func disconnect() async {
-        await unsubscribeAll()
-        print("🔌 RealtimeService disconnected")
+        currentUserId = nil
+        newMessage = nil
+
+        await unsubscribeConversations()
+        await unsubscribeMessages()
+        await unsubscribeNotifications()
+
+        // 取消所有会话内通道
+        for (id, channel) in conversationChannels {
+            await channel.unsubscribe()
+            conversationChannels[id] = nil
+        }
+    }
+
+    // MARK: - Helpers
+
+    func clearNewMessage() {
+        newMessage = nil
     }
 
     // MARK: - Notifications
 
-    func subscribeToNotifications(
-        userId: String,
-        onInsert: @escaping (Notification) -> Void
-    ) async {
-        await unsubscribeNotifications()
+    func subscribeToNotifications(userId: String, onInsert: @escaping (Notification) -> Void) async {
+        // 复用已存在的通道
+        if let channel = notificationChannel {
+            await channel.unsubscribe()
+            notificationChannel = nil
+        }
 
-        let channel = client.channel("notifications_user_\(userId)")
-        // 订阅 notifications 表的 INSERT 事件
-        channel.on(
-            RealtimeListenEvent.postgresChanges,
-            channel: .postgresChanges(
-                event: .insert,
-                schema: "public",
-                table: "notifications",
-                filter: "user_id=eq.\(userId)"
-            )
-        ) { payload in
-            do {
-                let data = try JSONSerialization.data(withJSONObject: payload.record, options: [])
-                let notif = try JSONDecoder().decode(Notification.self, from: data)
-                onInsert(notif)
-            } catch {
-                print("❌ 解析通知失败: \(error)")
+        let channel = client.realtimeV2.channel("notifications:\(userId)")
+        notificationChannel = channel
+
+        Task {
+            for await change in channel.postgresChange(InsertAction.self, schema: "public", table: "notifications") {
+                do {
+                    let notif = try change.decodeRecord(as: Notification.self, decoder: JSONDecoder())
+                    if notif.userId == userId {
+                        onInsert(notif)
+                        // 收到新的未读通知时，增加全局未读计数
+                        if !notif.isRead {
+                            UnreadCenter.shared.incrementNotifications()
+                        }
+                    }
+                } catch {
+                    print("⚠️ decode notification insert failed: \(error)")
+                }
             }
         }
 
-        let status = await channel.subscribe()
-        print("📡 Notifications subscribe status: \(status)")
-        notificationChannel = channel
+        do {
+            try await channel.subscribeWithError()
+        } catch {
+            print("❌ subscribe notifications failed: \(error)")
+        }
     }
 
     func unsubscribeNotifications() async {
         if let channel = notificationChannel {
             await channel.unsubscribe()
+            notificationChannel = nil
         }
-        notificationChannel = nil
     }
 
-    // MARK: - Conversations (optional upsert events)
+    // MARK: - Messages (global inbox for a user)
 
-    func subscribeToConversations(
-        userId: String,
-        onUpsert: @escaping () -> Void
-    ) async {
-        // 有些场景会监听 conversations 表的更新，这里提供一个轻量回调
-        await unsubscribeConversations()
-
-        let channel = client.channel("conversations_user_\(userId)")
-        channel.on(
-            RealtimeListenEvent.postgresChanges,
-            channel: .postgresChanges(
-                event: .update,
-                schema: "public",
-                table: "conversations",
-                filter: "participant1_id=eq.\(userId),participant2_id=eq.\(userId)"
-            )
-        ) { _ in
-            onUpsert()
+    func subscribeToMessages(userId: String, onInsert: @escaping (Message) -> Void) async {
+        if let channel = messagesChannel {
+            await channel.unsubscribe()
+            messagesChannel = nil
         }
 
-        let status = await channel.subscribe()
-        print("📡 Conversations subscribe status: \(status)")
-        conversationChannel = channel
+        let channel = client.realtimeV2.channel("messages:\(userId)")
+        messagesChannel = channel
+
+        Task {
+            for await change in channel.postgresChange(InsertAction.self, schema: "public", table: "messages") {
+                do {
+                    let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
+                    // 只处理与当前用户相关（收件人或发件人）
+                    if message.receiverId == userId || message.senderId == userId {
+                        onInsert(message)
+                    }
+                } catch {
+                    print("⚠️ decode message insert failed: \(error)")
+                }
+            }
+        }
+
+        do {
+            try await channel.subscribeWithError()
+        } catch {
+            print("❌ subscribe messages failed: \(error)")
+        }
+    }
+
+    func unsubscribeMessages() async {
+        if let channel = messagesChannel {
+            await channel.unsubscribe()
+            messagesChannel = nil
+        }
+    }
+
+    // MARK: - Conversation specific (single conversation page)
+
+    func subscribeToConversationMessages(conversationId: String, onInsert: @escaping (Message) -> Void) async {
+        if let existing = conversationChannels[conversationId] {
+            await existing.unsubscribe()
+            conversationChannels[conversationId] = nil
+        }
+
+        let channel = client.realtimeV2.channel("conversation:\(conversationId)")
+        conversationChannels[conversationId] = channel
+
+        Task {
+            for await change in channel.postgresChange(InsertAction.self, schema: "public", table: "messages") {
+                do {
+                    let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
+                    if message.conversationId == conversationId {
+                        onInsert(message)
+                    }
+                } catch {
+                    print("⚠️ decode conversation message insert failed: \(error)")
+                }
+            }
+        }
+
+        do {
+            try await channel.subscribeWithError()
+        } catch {
+            print("❌ subscribe conversation(\(conversationId)) failed: \(error)")
+        }
+    }
+
+    func unsubscribeConversationMessages(conversationId: String) async {
+        if let channel = conversationChannels[conversationId] {
+            await channel.unsubscribe()
+            conversationChannels[conversationId] = nil
+        }
+    }
+
+    // MARK: - Conversations list (global, for list screens)
+
+    /// 订阅与用户相关的所有新消息，用于会话列表联动与全局新消息提示
+    func subscribeToConversations(userId: String, onChange: @escaping (Message) -> Void) async {
+        // 若已有旧通道，先退订
+        if let channel = conversationsChannel {
+            await channel.unsubscribe()
+            conversationsChannel = nil
+        }
+
+        let channel = client.realtimeV2.channel("conversations:\(userId)")
+        conversationsChannel = channel
+
+        Task {
+            for await change in channel.postgresChange(InsertAction.self, schema: "public", table: "messages") {
+                do {
+                    let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
+                    // 仅处理与该用户相关的消息
+                    if message.receiverId == userId || message.senderId == userId {
+                        // 发布到 @Published，供视图 onReceive(realtimeService.$newMessage) 使用
+                        self.newMessage = message
+                        // 回调给调用方（例如刷新或本地重排）
+                        onChange(message)
+                    }
+                } catch {
+                    print("⚠️ decode conversations message insert failed: \(error)")
+                }
+            }
+        }
+
+        do {
+            try await channel.subscribeWithError()
+        } catch {
+            print("❌ subscribe conversations failed: \(error)")
+        }
     }
 
     func unsubscribeConversations() async {
-        if let channel = conversationChannel {
+        if let channel = conversationsChannel {
             await channel.unsubscribe()
+            conversationsChannel = nil
         }
-        conversationChannel = nil
-    }
-
-    // MARK: - Messages
-
-    func subscribeToMessages(
-        conversationId: String,
-        onInsert: @escaping (Message) -> Void,
-        onUpdate: ((Message) -> Void)? = nil
-    ) async {
-        await unsubscribeMessages(conversationId: conversationId)
-
-        let channel = client.channel("messages_conv_\(conversationId)")
-
-        // INSERT
-        channel.on(
-            RealtimeListenEvent.postgresChanges,
-            channel: .postgresChanges(
-                event: .insert,
-                schema: "public",
-                table: "messages",
-                filter: "conversation_id=eq.\(conversationId)"
-            )
-        ) { payload in
-            do {
-                let data = try JSONSerialization.data(withJSONObject: payload.record, options: [])
-                let message = try JSONDecoder().decode(Message.self, from: data)
-                onInsert(message)
-            } catch {
-                print("❌ 解析消息失败: \(error)")
-            }
-        }
-
-        // UPDATE（已读等）
-        channel.on(
-            RealtimeListenEvent.postgresChanges,
-            channel: .postgresChanges(
-                event: .update,
-                schema: "public",
-                table: "messages",
-                filter: "conversation_id=eq.\(conversationId)"
-            )
-        ) { payload in
-            guard let onUpdate else { return }
-            do {
-                let data = try JSONSerialization.data(withJSONObject: payload.record, options: [])
-                let message = try JSONDecoder().decode(Message.self, from: data)
-                onUpdate(message)
-            } catch {
-                print("❌ 解析消息失败: \(error)")
-            }
-        }
-
-        let status = await channel.subscribe()
-        print("📡 Messages subscribe status: \(status) for conv: \(conversationId)")
-        messageChannels[conversationId] = channel
-    }
-
-    func unsubscribeMessages(conversationId: String) async {
-        if let channel = messageChannels[conversationId] {
-            await channel.unsubscribe()
-        }
-        messageChannels.removeValue(forKey: conversationId)
-    }
-
-    func unsubscribeAll() async {
-        await unsubscribeNotifications()
-        await unsubscribeConversations()
-        for (convId, channel) in messageChannels {
-            print("🧹 Unsub messages for conv: \(convId)")
-            await channel.unsubscribe()
-        }
-        messageChannels.removeAll()
     }
 }

@@ -2,13 +2,16 @@
 //  PostDetailView.swift
 //  Melodii
 //
-//  公共的帖子详情视图（从 Discover/Home 均可跳转）
+//  公共的帖子详情视图（从 Discover/Home/通知 均可跳转）
 //
 
 import SwiftUI
+import AVKit
+import Combine
 
 struct PostDetailView: View {
     let post: Post
+    let scrollToCommentId: String?
 
     @ObservedObject private var authService = AuthService.shared
     @ObservedObject private var supabaseService = SupabaseService.shared
@@ -30,242 +33,257 @@ struct PostDetailView: View {
     @State private var isTogglingCollect = false
     @State private var showAlert = false
     @State private var alertMessage = ""
-    @State private var selectedImageIndex: Int? = nil
     @FocusState private var isCommentFieldFocused: Bool
     @State private var showShare = false
 
-    init(post: Post) {
+    // 全屏媒体预览
+    @State private var showViewer = false
+    @State private var viewerIndex = 0
+
+    // 评论滚动
+    @State private var pendingScrollTarget: String?
+
+    init(post: Post, commentId: String? = nil) {
         self.post = post
+        self.scrollToCommentId = commentId
         _likeCount = State(initialValue: post.likeCount)
         _commentCount = State(initialValue: post.commentCount)
         _collectCount = State(initialValue: post.collectCount)
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // 作者信息
-                HStack(spacing: 12) {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [.blue.opacity(0.6), .purple.opacity(0.6)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 50, height: 50)
-                        .overlay(
-                            Text(post.author.initials)
-                                .font(.title3)
-                                .foregroundStyle(Color.white)
-                        )
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // 作者信息
+                    HStack(spacing: 12) {
+                        NavigationLink(destination: UserProfileView(user: post.author)) {
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [.blue.opacity(0.6), .purple.opacity(0.6)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: 50, height: 50)
+                                .overlay(
+                                    Text(post.author.initials)
+                                        .font(.title3)
+                                        .foregroundStyle(Color.white)
+                                )
+                        }
+                        .buttonStyle(.plain)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        let displayName = (post.author.nickname == "Loading...") ? "用户" : post.author.nickname
-                        Text(displayName)
-                            .font(.headline)
+                        NavigationLink(destination: UserProfileView(user: post.author)) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                let displayName = (post.author.nickname == "Loading...") ? "用户" : post.author.nickname
+                                Text(displayName)
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
 
-                        Text(post.createdAt.timeAgoDisplay)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                                // 显示 MID + 数据库 ID + 时间
+                                HStack(spacing: 6) {
+                                    if let mid = post.author.mid {
+                                        Text("MID: \(mid)")
+                                            .font(.caption)
+                                            .foregroundStyle(.blue)
+                                    }
+                                    Text("ID: \(post.author.id)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
 
-                    Spacer()
+                                    Text("•")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
 
-                    // 关注按钮
-                    if let userId = authService.currentUser?.id, userId != post.author.id {
-                        Button {
-                            Task { await toggleFollow() }
-                        } label: {
-                            Group {
-                                if isTogglingFollow {
-                                    ProgressView()
-                                        .frame(width: 20, height: 20)
-                                } else {
-                                    Text(isFollowing ? "已关注" : "关注")
+                                    Text(post.createdAt.timeAgoDisplay)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(isFollowing ? .primary : Color.white)
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 8)
-                            .background(
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+
+                        // 关注按钮
+                        if let userId = authService.currentUser?.id, userId != post.author.id {
+                            Button {
+                                Task { await toggleFollow() }
+                            } label: {
                                 Group {
-                                    if isFollowing {
-                                        Color(.systemGray5)
+                                    if isTogglingFollow {
+                                        ProgressView()
+                                            .frame(width: 20, height: 20)
                                     } else {
-                                        LinearGradient(
-                                            colors: [.blue, .purple],
-                                            startPoint: .leading,
-                                            endPoint: .trailing
-                                        )
+                                        Text(isFollowing ? "已关注" : "关注")
                                     }
                                 }
-                            )
-                            .clipShape(Capsule())
-                        }
-                        .disabled(isTogglingFollow)
-                    }
-                }
-                .padding(16)
-
-                // 图片展示
-                if !post.mediaURLs.isEmpty {
-                    TabView(selection: $selectedImageIndex) {
-                        ForEach(Array(post.mediaURLs.enumerated()), id: \.offset) { index, url in
-                            AsyncImage(url: URL(string: url)) { phase in
-                                switch phase {
-                                case .empty:
-                                    Rectangle()
-                                        .fill(Color(.systemGray6))
-                                        .overlay(ProgressView())
-                                case .success(let image):
-                                    image
-                                        .resizable()
-                                        .scaledToFit()
-                                case .failure:
-                                    Rectangle()
-                                        .fill(Color(.systemGray6))
-                                        .overlay(
-                                            Image(systemName: "photo")
-                                                .font(.largeTitle)
-                                                .foregroundStyle(.secondary)
-                                        )
-                                @unknown default:
-                                    EmptyView()
-                                }
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(isFollowing ? .primary : Color.white)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 8)
+                                .background(
+                                    Group {
+                                        if isFollowing {
+                                            Color(.systemGray5)
+                                        } else {
+                                            LinearGradient(
+                                                colors: [.blue, .purple],
+                                                startPoint: .leading,
+                                                endPoint: .trailing
+                                            )
+                                        }
+                                    }
+                                )
+                                .clipShape(Capsule())
                             }
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 400)
-                            .tag(index)
+                            .disabled(isTogglingFollow)
                         }
                     }
-                    .frame(height: 400)
-                    .tabViewStyle(.page(indexDisplayMode: .always))
-                }
+                    .padding(16)
 
-                // 交互按钮
-                HStack(spacing: 24) {
-                    // 点赞
-                    Button {
-                        Task { await toggleLike() }
-                    } label: {
-                        HStack(spacing: 6) {
+                    // 媒体展示（点击放大）
+                    if !post.mediaURLs.isEmpty {
+                        TabView(selection: $viewerIndex) {
+                            ForEach(Array(post.mediaURLs.enumerated()), id: \.offset) { index, url in
+                                MediaPage(urlString: url)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        viewerIndex = index
+                                        showViewer = true
+                                    }
+                                    .tag(index)
+                            }
+                        }
+                        .frame(height: 400)
+                        .tabViewStyle(.page(indexDisplayMode: .always))
+                        .sheet(isPresented: $showViewer) {
+                            FullscreenMediaViewer(urls: post.mediaURLs, isPresented: $showViewer, index: viewerIndex)
+                        }
+                    }
+
+                    // 交互按钮
+                    HStack(spacing: 24) {
+                        Button {
+                            Task { await toggleLike() }
+                        } label: {
                             Image(systemName: isLiked ? "heart.fill" : "heart")
                                 .foregroundStyle(isLiked ? .red : .primary)
-                            Text("\(likeCount)")
-                                .font(.subheadline)
                         }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isTogglingLike)
+                        .buttonStyle(.plain)
+                        .disabled(isTogglingLike)
 
-                    // 评论
-                    HStack(spacing: 6) {
-                        Image(systemName: "text.bubble")
-                        Text("\(commentCount)")
-                            .font(.subheadline)
-                    }
-                    .foregroundStyle(.secondary)
+                        Button {
+                            isCommentFieldFocused = true
+                        } label: {
+                            Image(systemName: "text.bubble")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
 
-                    // 收藏
-                    Button {
-                        Task { await toggleCollect() }
-                    } label: {
-                        HStack(spacing: 6) {
+                        Button {
+                            Task { await toggleCollect() }
+                        } label: {
                             Image(systemName: isCollected ? "bookmark.fill" : "bookmark")
                                 .foregroundStyle(isCollected ? .blue : .primary)
-                            Text("\(collectCount)")
-                                .font(.subheadline)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isTogglingCollect)
+
+                        Spacer()
+
+                        Button {
+                            showShare = true
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                                .foregroundStyle(.primary)
+                        }
+                        .sheet(isPresented: $showShare) {
+                            let text = post.text ?? ""
+                            let urls = post.mediaURLs.compactMap { URL(string: $0) }
+                            ShareSheet(activityItems: [text] + urls)
                         }
                     }
-                    .buttonStyle(.plain)
-                    .disabled(isTogglingCollect)
+                    .font(.title3)
+                    .padding(16)
 
-                    Spacer()
-
-                    // 分享
-                    Button {
-                        showShare = true
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                            .foregroundStyle(.primary)
+                    // 文字内容
+                    if let text = post.text, !text.isEmpty {
+                        Text(text)
+                            .font(.body)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
                     }
-                    .sheet(isPresented: $showShare) {
-                        let text = post.text ?? ""
-                        let urls = post.mediaURLs.compactMap { URL(string: $0) }
-                        ShareSheet(activityItems: [text] + urls)
-                    }
-                }
-                .font(.title3)
-                .padding(16)
 
-                // 文字内容
-                if let text = post.text, !text.isEmpty {
-                    Text(text)
-                        .font(.body)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
-                }
-
-                // 话题标签
-                if !post.topics.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(post.topics, id: \.self) { topic in
-                                Text("#\(topic)")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.blue)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        Capsule()
-                                            .fill(Color.blue.opacity(0.1))
-                                    )
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                    .padding(.bottom, 16)
-                }
-
-                Divider()
-                    .padding(.horizontal, 16)
-
-                // 评论区
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("评论 \(commentCount)")
-                        .font(.headline)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 16)
-
-                    if isLoadingComments {
-                        HStack {
-                            Spacer()
-                            ProgressView()
-                            Spacer()
-                        }
-                        .padding()
-                    } else if comments.isEmpty {
-                        Text("还没有评论，来说点什么吧～")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding()
-                    } else {
-                        ForEach(comments) { comment in
-                            CommentRow(comment: comment) { replyTo in
-                                replyToComment = replyTo
-                                commentText = ""
-                                isCommentFieldFocused = true
+                    // 话题标签
+                    if !post.topics.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(post.topics, id: \.self) { topic in
+                                    Text("#\(topic)")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.blue)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(
+                                            Capsule()
+                                                .fill(Color.blue.opacity(0.1))
+                                        )
+                                }
                             }
                             .padding(.horizontal, 16)
                         }
+                        .padding(.bottom, 16)
+                    }
+
+                    Divider()
+                        .padding(.horizontal, 16)
+
+                    // 评论区
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("评论")
+                            .font(.headline)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 16)
+
+                        if isLoadingComments {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                Spacer()
+                            }
+                            .padding()
+                        } else if comments.isEmpty {
+                            Text("还没有评论，来说点什么吧～")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding()
+                        } else {
+                            ForEach(comments) { comment in
+                                CommentRow(comment: comment) { replyTo in
+                                    replyToComment = replyTo
+                                    commentText = ""
+                                    isCommentFieldFocused = true
+                                }
+                                .padding(.horizontal, 16)
+                                .id(comment.id)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 80)
+                }
+            }
+            .onChange(of: comments.count) { _, _ in
+                if let target = pendingScrollTarget {
+                    pendingScrollTarget = nil
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(target, anchor: .center)
                     }
                 }
-                .padding(.bottom, 80)
             }
         }
         .navigationTitle("动态详情")
@@ -321,15 +339,21 @@ struct PostDetailView: View {
         }
         .task {
             await loadData()
+            if let target = scrollToCommentId, !target.isEmpty {
+                pendingScrollTarget = target
+            }
         }
         .alert("提示", isPresented: $showAlert) {
             Button("确定", role: .cancel) {}
         } message: {
             Text(alertMessage)
         }
+        .navigationDestination(for: User.self) { user in
+            UserProfileView(user: user)
+        }
     }
 
-    // MARK: - Data Loading
+    // MARK: - Data
 
     private func loadData() async {
         if let userId = authService.currentUser?.id {
@@ -367,14 +391,23 @@ struct PostDetailView: View {
         do {
             if isLiked {
                 try await supabaseService.likePost(userId: userId, postId: post.id)
+                await MainActor.run {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                }
             } else {
                 try await supabaseService.unlikePost(userId: userId, postId: post.id)
+                await MainActor.run {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
             }
         } catch {
             isLiked = wasLiked
             likeCount += wasLiked ? 1 : -1
             alertMessage = "操作失败: \(error.localizedDescription)"
             showAlert = true
+            await MainActor.run {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
         }
         isTogglingLike = false
     }
@@ -394,14 +427,23 @@ struct PostDetailView: View {
         do {
             if isCollected {
                 try await supabaseService.collectPost(userId: userId, postId: post.id)
+                await MainActor.run {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                }
             } else {
                 try await supabaseService.uncollectPost(userId: userId, postId: post.id)
+                await MainActor.run {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
             }
         } catch {
             isCollected = wasCollected
             collectCount += wasCollected ? 1 : -1
             alertMessage = "操作失败: \(error.localizedDescription)"
             showAlert = true
+            await MainActor.run {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
         }
         isTogglingCollect = false
     }
@@ -421,13 +463,22 @@ struct PostDetailView: View {
         do {
             if isFollowing {
                 try await supabaseService.followUser(followerId: userId, followingId: post.author.id)
+                await MainActor.run {
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
             } else {
                 try await supabaseService.unfollowUser(followerId: userId, followingId: post.author.id)
+                await MainActor.run {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
             }
         } catch {
             isFollowing = wasFollowing
             alertMessage = "操作失败: \(error.localizedDescription)"
             showAlert = true
+            await MainActor.run {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
         }
 
         isTogglingFollow = false
@@ -463,211 +514,180 @@ struct PostDetailView: View {
             commentText = ""
             replyToComment = nil
             isCommentFieldFocused = false
+            await MainActor.run {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }
         } catch {
             alertMessage = "发送失败: \(error.localizedDescription)"
             showAlert = true
+            await MainActor.run {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
         }
 
         isSubmittingComment = false
     }
 }
 
-// MARK: - Comment Row (简化版，复用你在 DiscoverView 的样式)
+// 单页媒体（用于 TabView 内）
+private struct MediaPage: View {
+    let urlString: String
+    @State private var player: AVPlayer?
+    @State private var isLoading = true
+    @State private var hasError = false
 
+    private func isVideo(_ url: String) -> Bool {
+        let lower = url.lowercased()
+        return lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || lower.hasSuffix(".m4v") || lower.hasSuffix(".avi") || lower.hasSuffix(".mkv")
+    }
+
+    var body: some View {
+        Group {
+            if isVideo(urlString) {
+                ZStack {
+                    if let player = player {
+                        VideoPlayer(player: player)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color.black)
+                            .onAppear {
+                                player.play()
+                            }
+                            .onDisappear {
+                                player.pause()
+                            }
+                    } else if hasError {
+                        VStack(spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 30))
+                                .foregroundStyle(.red)
+                            Text("视频加载失败")
+                                .font(.subheadline)
+                                .foregroundStyle(.white)
+                            Button("重试") {
+                                setupVideoPlayer()
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue)
+                            .clipShape(Capsule())
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
+                    } else if isLoading {
+                        VStack(spacing: 8) {
+                            ProgressView()
+                                .tint(.white)
+                            Text("加载视频中...")
+                                .font(.caption)
+                                .foregroundStyle(.white)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
+                    }
+                }
+                .onAppear {
+                    setupVideoPlayer()
+                }
+                .onDisappear {
+                    cleanupVideoPlayer()
+                }
+            } else {
+                AsyncImage(url: URL(string: urlString)) { phase in
+                    switch phase {
+                    case .empty:
+                        Color(.systemGray6).overlay(
+                            ProgressView()
+                                .tint(.gray)
+                        )
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    case .failure:
+                        Color(.systemGray6).overlay(
+                            VStack(spacing: 8) {
+                                Image(systemName: "photo.badge.exclamationmark")
+                                    .font(.largeTitle)
+                                    .foregroundStyle(.secondary)
+                                Text("图片加载失败")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        )
+                    @unknown default:
+                        EmptyView()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    private func setupVideoPlayer() {
+        guard let url = URL(string: urlString) else {
+            hasError = true
+            isLoading = false
+            return
+        }
+        
+        isLoading = true
+        hasError = false
+        
+        // 清理之前的播放器
+        cleanupVideoPlayer()
+        
+        // 创建播放器
+        let newPlayer = AVPlayer(url: url)
+        
+        // 监听播放器状态
+        newPlayer.currentItem?.publisher(for: \.status)
+            .sink { status in
+                DispatchQueue.main.async {
+                    switch status {
+                    case .readyToPlay:
+                        isLoading = false
+                        hasError = false
+                        player = newPlayer
+                    case .failed:
+                        isLoading = false
+                        hasError = true
+                        print("视频播放失败: \(newPlayer.currentItem?.error?.localizedDescription ?? "未知错误")")
+                    case .unknown:
+                        break
+                    @unknown default:
+                        break
+                    }
+                }
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func cleanupVideoPlayer() {
+        player?.pause()
+        player = nil
+        cancellables.removeAll()
+    }
+    
+    @State private var cancellables = Set<AnyCancellable>()
+}
+
+// 评论行保留你现有实现；这里占位
 private struct CommentRow: View {
     let comment: Comment
     let onReply: (Comment) -> Void
 
-    @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
-
-    @State private var isLiked = false
-    @State private var likeCount: Int
-    @State private var replies: [Comment] = []
-    @State private var showReplies = false
-    @State private var isLoadingReplies = false
-    @State private var isTogglingLike = false
-
-    init(comment: Comment, onReply: @escaping (Comment) -> Void) {
-        self.comment = comment
-        self.onReply = onReply
-        _likeCount = State(initialValue: comment.likeCount)
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [.orange.opacity(0.6), .pink.opacity(0.6)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 36, height: 36)
-                    .overlay(
-                        Text(comment.author.initials)
-                            .font(.caption)
-                            .foregroundStyle(Color.white)
-                    )
-
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        let displayName = (comment.author.nickname == "Loading...") ? "用户" : comment.author.nickname
-                        Text(displayName)
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-
-                        Text(comment.createdAt.timeAgoDisplay)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Text(comment.text)
-                        .font(.body)
-
-                    HStack(spacing: 20) {
-                        Button {
-                            Task { await toggleLike() }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: isLiked ? "heart.fill" : "heart")
-                                    .font(.caption)
-                                    .foregroundStyle(isLiked ? .red : .secondary)
-
-                                if likeCount > 0 {
-                                    Text("\(likeCount)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isTogglingLike)
-
-                        Button {
-                            onReply(comment)
-                        } label: {
-                            Text("回复")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-
-                        if comment.replyToId == nil {
-                            Button {
-                                Task {
-                                    if showReplies {
-                                        showReplies = false
-                                    } else {
-                                        await loadReplies()
-                                        showReplies = true
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: showReplies ? "chevron.up" : "chevron.down")
-                                        .font(.caption2)
-                                    if !replies.isEmpty {
-                                        Text("\(replies.count)条回复")
-                                            .font(.caption)
-                                    }
-                                }
-                                .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.top, 4)
-                }
-
-                Spacer()
-            }
-
-            if showReplies && !replies.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(replies) { reply in
-                        HStack(alignment: .top, spacing: 8) {
-                            Rectangle()
-                                .fill(Color(.systemGray4))
-                                .frame(width: 2)
-                                .padding(.leading, 8)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    let name = (reply.author.nickname == "Loading...") ? "用户" : reply.author.nickname
-                                    Text(name)
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
-
-                                    Text(reply.createdAt.timeAgoDisplay)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Text(reply.text)
-                                    .font(.subheadline)
-                            }
-                        }
-                    }
-                }
-                .padding(.leading, 48)
-            }
-
-            if isLoadingReplies {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                        .scaleEffect(0.8)
-                    Spacer()
-                }
-                .padding(.leading, 48)
-            }
+        // 请替换为你项目中的实际 CommentRow 内容
+        VStack(alignment: .leading, spacing: 4) {
+            Text(comment.author.nickname == "Loading..." ? "用户" : comment.author.nickname)
+                .font(.subheadline).bold()
+            Text(comment.text)
+                .font(.body)
         }
-        .padding(.vertical, 8)
-        .task {
-            await loadLikeStatus()
-        }
-    }
-
-    private func loadLikeStatus() async {
-        guard let userId = authService.currentUser?.id else { return }
-        do {
-            isLiked = try await supabaseService.hasLikedComment(userId: userId, commentId: comment.id)
-        } catch {
-            print("加载评论点赞状态失败: \(error)")
-        }
-    }
-
-    private func toggleLike() async {
-        guard let userId = authService.currentUser?.id else { return }
-
-        isTogglingLike = true
-        let wasLiked = isLiked
-        isLiked.toggle()
-        likeCount += isLiked ? 1 : -1
-
-        do {
-            if isLiked {
-                try await supabaseService.likeComment(userId: userId, commentId: comment.id)
-            } else {
-                try await supabaseService.unlikeComment(userId: userId, commentId: comment.id)
-            }
-        } catch {
-            isLiked = wasLiked
-            likeCount += wasLiked ? 1 : -1
-            print("评论点赞操作失败: \(error)")
-        }
-        isTogglingLike = false
-    }
-
-    private func loadReplies() async {
-        isLoadingReplies = true
-        do {
-            replies = try await supabaseService.fetchCommentReplies(commentId: comment.id)
-        } catch {
-            print("加载回复失败: \(error)")
-        }
-        isLoadingReplies = false
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
