@@ -243,6 +243,14 @@ struct ProfileView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            VStack(spacing: 4) {
+                Text("\(userPosts.count)")
+                    .font(.headline)
+                Text("帖子")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

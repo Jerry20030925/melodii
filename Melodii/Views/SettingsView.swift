@@ -10,6 +10,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var themeManager = ThemeManager.shared
+    @ObservedObject private var languageManager = LanguageManager.shared
     @ObservedObject private var authService = AuthService.shared
     @ObservedObject private var supabaseService = SupabaseService.shared
 
@@ -19,35 +20,49 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                // 语言设置
+                Section {
+                    Picker(LocalizedStringKey("语言"), selection: $languageManager.currentLanguage) {
+                        ForEach(AppLanguage.allCases, id: \.self) { lang in
+                            Text(lang.rawValue).tag(lang)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: languageManager.currentLanguage) { _, newValue in
+                        languageManager.setLanguage(newValue)
+                    }
+                } header: {
+                    Label(LocalizedStringKey("语言"), systemImage: "globe")
+                }
                 // 外观设置
                 Section {
-                    Picker("主题模式", selection: $themeManager.currentTheme) {
+                    Picker(LocalizedStringKey("主题模式"), selection: $themeManager.currentTheme) {
                         ForEach(AppTheme.allCases, id: \.self) { theme in
-                            Text(theme.rawValue).tag(theme)
+                            Text(LocalizedStringKey(theme.rawValue)).tag(theme)
                         }
                     }
                     .pickerStyle(.menu)
                 } header: {
-                    Label("外观", systemImage: "paintbrush")
+                    Label(LocalizedStringKey("外观"), systemImage: "paintbrush")
                 }
 
                 // 隐私设置（暂时禁用，需要数据库支持）
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Label {
-                            Text("隐私功能即将推出")
+                            Text(LocalizedStringKey("隐私功能即将推出"))
                                 .foregroundStyle(.secondary)
                         } icon: {
                             Image(systemName: "lock.shield")
                                 .foregroundStyle(.blue)
                         }
-                        Text("关注/粉丝列表隐私设置功能正在开发中")
+                        Text(LocalizedStringKey("关注/粉丝列表隐私设置功能正在开发中"))
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }
                     .padding(.vertical, 4)
                 } header: {
-                    Label("隐私", systemImage: "hand.raised")
+                    Label(LocalizedStringKey("隐私"), systemImage: "hand.raised")
                 }
 
                 // 通知设置
@@ -55,30 +70,30 @@ struct SettingsView: View {
                     NavigationLink {
                         NotificationSettingsView()
                     } label: {
-                        Label("通知设置", systemImage: "bell.badge")
+                        Label(LocalizedStringKey("通知设置"), systemImage: "bell.badge")
                     }
                 } header: {
-                    Label("通知", systemImage: "app.badge")
+                    Label(LocalizedStringKey("通知"), systemImage: "app.badge")
                 }
 
                 // 关于
                 Section {
                     HStack {
-                        Text("版本")
+                        Text(LocalizedStringKey("版本"))
                         Spacer()
                         Text("1.0.0")
                             .foregroundStyle(.secondary)
                     }
 
                     Link(destination: URL(string: "https://example.com/terms")!) {
-                        Label("用户协议", systemImage: "doc.text")
+                        Label(LocalizedStringKey("用户协议"), systemImage: "doc.text")
                     }
 
                     Link(destination: URL(string: "https://example.com/privacy")!) {
-                        Label("隐私政策", systemImage: "lock.shield")
+                        Label(LocalizedStringKey("隐私政策"), systemImage: "lock.shield")
                     }
                 } header: {
-                    Label("关于", systemImage: "info.circle")
+                    Label(LocalizedStringKey("关于"), systemImage: "info.circle")
                 }
 
                 // 退出登录
@@ -92,23 +107,23 @@ struct SettingsView: View {
                     } label: {
                         HStack {
                             Spacer()
-                            Label("退出登录", systemImage: "arrow.right.square")
+                            Label(LocalizedStringKey("退出登录"), systemImage: "arrow.right.square")
                             Spacer()
                         }
                     }
                 }
             }
-            .navigationTitle("设置")
+            .navigationTitle(LocalizedStringKey("设置"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") {
+                    Button(LocalizedStringKey("完成")) {
                         dismiss()
                     }
                 }
             }
-            .alert("提示", isPresented: $showAlert) {
-                Button("确定", role: .cancel) {}
+            .alert(LocalizedStringKey("提示"), isPresented: $showAlert) {
+                Button(LocalizedStringKey("确定"), role: .cancel) {}
             } message: {
                 Text(alertMessage)
             }

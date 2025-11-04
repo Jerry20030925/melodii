@@ -14,6 +14,7 @@ final class User: Codable, Hashable {
     @Attribute(.unique) var id: String
     // 唯一对外展示的用户编号（MID），用于搜索
     var mid: String?
+    var lastMidUpdate: Date? // 上次MID修改时间
     var appleUserId: String?
     var nickname: String
     var avatarURL: String?
@@ -35,6 +36,7 @@ final class User: Codable, Hashable {
     init(id: String = UUID().uuidString,
          appleUserId: String? = nil,
          mid: String? = nil,
+         lastMidUpdate: Date? = nil,
          nickname: String,
          avatarURL: String? = nil,
          coverImageURL: String? = nil,
@@ -50,6 +52,7 @@ final class User: Codable, Hashable {
         self.id = id
         self.appleUserId = appleUserId
         self.mid = mid
+        self.lastMidUpdate = lastMidUpdate
         self.nickname = nickname
         self.avatarURL = avatarURL
         self.coverImageURL = coverImageURL
@@ -67,10 +70,24 @@ final class User: Codable, Hashable {
     var initials: String {
         String(nickname.prefix(1))
     }
+    
+    /// 检查是否可以修改MID（每半年只能修改一次）
+    var canUpdateMid: Bool {
+        guard let lastUpdate = lastMidUpdate else { return true }
+        let sixMonthsAgo = Calendar.current.date(byAdding: .month, value: -6, to: Date()) ?? Date()
+        return lastUpdate < sixMonthsAgo
+    }
+    
+    /// 获取下次可修改MID的日期
+    var nextMidUpdateDate: Date? {
+        guard let lastUpdate = lastMidUpdate else { return nil }
+        return Calendar.current.date(byAdding: .month, value: 6, to: lastUpdate)
+    }
 
     // Codable支持（用于Supabase）
     enum CodingKeys: String, CodingKey {
-        case id, appleUserId = "apple_user_id", mid, nickname, avatarURL = "avatar_url"
+        case id, appleUserId = "apple_user_id", mid, lastMidUpdate = "last_mid_update"
+        case nickname, avatarURL = "avatar_url"
         case coverImageURL = "cover_image_url", bio, birthday, interests
         case isOnboardingCompleted = "is_onboarding_completed"
         case followingCount = "following_count"
@@ -84,6 +101,7 @@ final class User: Codable, Hashable {
         id = try container.decode(String.self, forKey: .id)
         appleUserId = try container.decodeIfPresent(String.self, forKey: .appleUserId)
         mid = try container.decodeIfPresent(String.self, forKey: .mid)
+        lastMidUpdate = try container.decodeIfPresent(Date.self, forKey: .lastMidUpdate)
         nickname = try container.decode(String.self, forKey: .nickname)
         avatarURL = try container.decodeIfPresent(String.self, forKey: .avatarURL)
         coverImageURL = try container.decodeIfPresent(String.self, forKey: .coverImageURL)
@@ -103,6 +121,7 @@ final class User: Codable, Hashable {
         try container.encode(id, forKey: .id)
         try container.encodeIfPresent(appleUserId, forKey: .appleUserId)
         try container.encodeIfPresent(mid, forKey: .mid)
+        try container.encodeIfPresent(lastMidUpdate, forKey: .lastMidUpdate)
         try container.encode(nickname, forKey: .nickname)
         try container.encodeIfPresent(avatarURL, forKey: .avatarURL)
         try container.encodeIfPresent(coverImageURL, forKey: .coverImageURL)

@@ -14,12 +14,18 @@ struct UserProfileView: View {
     @ObservedObject private var authService = AuthService.shared
     @ObservedObject private var supabaseService = SupabaseService.shared
 
+    @State private var displayUser: User
     @State private var userPosts: [Post] = []
     @State private var isLoadingPosts = false
     @State private var isFollowing = false
     @State private var isTogglingFollow = false
     @State private var showMessage = false
     @State private var showEditProfile = false
+
+    init(user: User) {
+        self.user = user
+        _displayUser = State(initialValue: user)
+    }
 
     // 为私信准备的本地会话与对方用户
     @State private var pendingConversation: Conversation?
@@ -46,12 +52,16 @@ struct UserProfileView: View {
                 profileInfoView
                     .padding(.horizontal, 20)
                     .padding(.top, 20)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                    .animation(.spring(response: 0.4, dampingFraction: 0.8), value: displayUser.id)
 
                 // 操作按钮
                 if !isOwnProfile {
                     actionButtonsView
                         .padding(.horizontal, 20)
                         .padding(.top, 16)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .animation(.spring(response: 0.5, dampingFraction: 0.75), value: isFollowing)
                 }
 
                 Divider()
@@ -99,7 +109,7 @@ struct UserProfileView: View {
         // 进入聊天：使用 ConversationView(conversation:otherUser:)
         .sheet(isPresented: $showMessage) {
             if let conv = pendingConversation, let other = pendingOtherUser {
-                ConversationView(conversation: conv, otherUser: other)
+                NavigationStack { ConversationView(conversation: conv, otherUser: other) }
             }
         }
         .task {
@@ -132,7 +142,7 @@ struct UserProfileView: View {
                         @unknown default: Color(.systemGray5)
                         }
                     }
-                } else if let cover = user.coverImageURL, let url = URL(string: cover) {
+                } else if let cover = displayUser.coverImageURL, let url = URL(string: cover) {
                     AsyncImage(url: url) { phase in
                         switch phase {
                         case .empty: Color(.systemGray5)
@@ -164,7 +174,7 @@ struct UserProfileView: View {
                     )
                     .frame(width: 100, height: 100)
 
-                if let avatar = user.avatarURL, let url = URL(string: avatar) {
+                if let avatar = displayUser.avatarURL, let url = URL(string: avatar) {
                     AsyncImage(url: url) { phase in
                         switch phase {
                         case .empty: Color.clear
@@ -176,7 +186,7 @@ struct UserProfileView: View {
                     .frame(width: 100, height: 100)
                     .clipShape(Circle())
                 } else {
-                    Text(user.initials)
+                    Text(displayUser.initials)
                         .font(.system(size: 36, weight: .bold))
                         .foregroundStyle(.white)
                 }
@@ -195,7 +205,7 @@ struct UserProfileView: View {
     private var profileInfoView: some View {
         VStack(alignment: .leading, spacing: 12) {
             // 昵称
-            Text(user.nickname)
+            Text(displayUser.nickname)
                 .font(.title2)
                 .fontWeight(.bold)
 
@@ -204,13 +214,13 @@ struct UserProfileView: View {
                 Text("MID:")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Text(user.mid ?? "-")
+                Text(displayUser.mid ?? "-")
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .foregroundStyle(.blue)
 
                 Button {
-                    UIPasteboard.general.string = user.mid ?? "-"
+                    UIPasteboard.general.string = displayUser.mid ?? "-"
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.caption)
@@ -218,8 +228,44 @@ struct UserProfileView: View {
                 }
             }
 
+            // 统计信息卡片
+            HStack(spacing: 12) {
+                StatCardView(
+                    title: "帖子",
+                    count: userPosts.count,
+                    icon: "square.text.square",
+                    gradient: [.blue, .cyan],
+                    delay: 0.0
+                )
+
+                StatCardView(
+                    title: "粉丝",
+                    count: displayUser.followersCount ?? 0,
+                    icon: "person.2",
+                    gradient: [.purple, .pink],
+                    delay: 0.1
+                )
+
+                StatCardView(
+                    title: "关注",
+                    count: displayUser.followingCount ?? 0,
+                    icon: "person.badge.plus",
+                    gradient: [.green, .mint],
+                    delay: 0.2
+                )
+
+                StatCardView(
+                    title: "获赞",
+                    count: displayUser.likesCount ?? 0,
+                    icon: "heart.fill",
+                    gradient: [.pink, .orange],
+                    delay: 0.3
+                )
+            }
+            .padding(.vertical, 8)
+
             // 个人简介
-            if let bio = user.bio, !bio.isEmpty {
+            if let bio = displayUser.bio, !bio.isEmpty {
                 Text(bio)
                     .font(.body)
                     .foregroundStyle(.secondary)
@@ -227,10 +273,10 @@ struct UserProfileView: View {
             }
 
             // 兴趣标签
-            if !user.interests.isEmpty {
+            if !displayUser.interests.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(user.interests, id: \.self) { interest in
+                        ForEach(displayUser.interests, id: \.self) { interest in
                             Text(interest)
                                 .font(.caption)
                                 .foregroundStyle(.blue)
@@ -249,14 +295,18 @@ struct UserProfileView: View {
 
     // MARK: - Action Buttons
 
+    @State private var messageButtonPressed = false
+    @State private var followButtonPressed = false
+
     private var actionButtonsView: some View {
         HStack(spacing: 12) {
             // 私信按钮
             Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 Task { await openConversation() }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "message")
+                    Image(systemName: "message.fill")
                     Text("私信")
                 }
                 .font(.subheadline)
@@ -266,22 +316,33 @@ struct UserProfileView: View {
                 .padding(.vertical, 12)
                 .background(Color(.systemGray6))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+                .shadow(color: .black.opacity(messageButtonPressed ? 0 : 0.05), radius: messageButtonPressed ? 2 : 6, x: 0, y: messageButtonPressed ? 1 : 3)
             }
+            .scaleEffect(messageButtonPressed ? 0.95 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: messageButtonPressed)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in messageButtonPressed = true }
+                    .onEnded { _ in messageButtonPressed = false }
+            )
 
             // 关注按钮
             Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 Task { await toggleFollow() }
             } label: {
                 Group {
                     if isTogglingFollow {
                         ProgressView()
+                            .tint(.white)
                     } else {
                         HStack(spacing: 6) {
-                            Image(systemName: isFollowing ? "checkmark" : "plus")
+                            Image(systemName: isFollowing ? "checkmark.circle.fill" : "plus.circle.fill")
                             Text(isFollowing ? "已关注" : "关注")
                         }
                         .font(.subheadline)
-                        .fontWeight(.medium)
+                        .fontWeight(.semibold)
+                        .transition(.scale.combined(with: .opacity))
                     }
                 }
                 .foregroundColor(.white)
@@ -289,11 +350,25 @@ struct UserProfileView: View {
                 .padding(.vertical, 12)
                 .background(
                     isFollowing ?
-                    LinearGradient(colors: [.gray, .gray], startPoint: .leading, endPoint: .trailing) :
+                    LinearGradient(colors: [.gray.opacity(0.8), .gray], startPoint: .leading, endPoint: .trailing) :
                     LinearGradient(colors: [.blue, .purple], startPoint: .leading, endPoint: .trailing)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+                .shadow(
+                    color: isFollowing ? Color.clear : Color.blue.opacity(followButtonPressed ? 0.1 : 0.3),
+                    radius: followButtonPressed ? 4 : 10,
+                    x: 0,
+                    y: followButtonPressed ? 2 : 5
+                )
             }
+            .scaleEffect(followButtonPressed ? 0.95 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: followButtonPressed)
+            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: isFollowing)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in if !isTogglingFollow { followButtonPressed = true } }
+                    .onEnded { _ in followButtonPressed = false }
+            )
             .disabled(isTogglingFollow)
         }
     }
@@ -385,20 +460,47 @@ struct UserProfileView: View {
 
         isTogglingFollow = true
         let wasFollowing = isFollowing
-        isFollowing.toggle()
 
         do {
-            if isFollowing {
-                try await supabaseService.followUser(followerId: userId, followingId: user.id)
-            } else {
+            if wasFollowing {
+                // 取消关注
                 try await supabaseService.unfollowUser(followerId: userId, followingId: user.id)
+                await MainActor.run {
+                    isFollowing = false
+                }
+            } else {
+                // 关注
+                try await supabaseService.followUser(followerId: userId, followingId: user.id)
+                await MainActor.run {
+                    isFollowing = true
+                }
             }
+
+            // 重新加载用户数据以更新统计信息
+            await reloadUserData()
+
+            // 确保关注状态与数据库同步
+            await loadFollowStatus()
         } catch {
-            isFollowing = wasFollowing
+            // 如果失败，恢复原状态
+            await MainActor.run {
+                isFollowing = wasFollowing
+            }
             print("关注操作失败: \(error)")
         }
 
         isTogglingFollow = false
+    }
+
+    private func reloadUserData() async {
+        do {
+            let updatedUser = try await supabaseService.fetchUser(id: user.id)
+            await MainActor.run {
+                displayUser = updatedUser
+            }
+        } catch {
+            print("重新加载用户数据失败: \(error)")
+        }
     }
 
     // MARK: - Open Conversation
@@ -564,6 +666,82 @@ private struct PostRowForProfile: View {
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color(.systemGray5), lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Stat Card Component
+
+private struct StatCardView: View {
+    let title: String
+    let count: Int
+    let icon: String
+    let gradient: [Color]
+    let delay: Double
+
+    @State private var appeared = false
+    @State private var isPressed = false
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: gradient.map { $0.opacity(0.2) },
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 48, height: 48)
+                    .shadow(
+                        color: gradient.first?.opacity(appeared ? 0.3 : 0) ?? .clear,
+                        radius: appeared ? 8 : 0,
+                        x: 0,
+                        y: appeared ? 4 : 0
+                    )
+
+                Image(systemName: icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: gradient,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .symbolEffect(.bounce, value: appeared)
+            }
+
+            VStack(spacing: 2) {
+                Text("\(count)")
+                    .font(.headline)
+                    .fontWeight(.bold)
+
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .scaleEffect(appeared ? 1.0 : 0.8)
+        .opacity(appeared ? 1.0 : 0)
+        .scaleEffect(isPressed ? 0.95 : 1.0)
+        .animation(.spring(response: 0.4, dampingFraction: 0.7).delay(delay), value: appeared)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isPressed)
+        .onAppear {
+            appeared = true
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.systemBackground))
+                .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 2)
         )
     }
 }

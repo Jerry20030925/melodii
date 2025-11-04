@@ -12,11 +12,12 @@ import PhotosUI
 struct ChatView: View {
     @ObservedObject private var authService = AuthService.shared
     @ObservedObject private var supabaseService = SupabaseService.shared
+    @ObservedObject private var realtimeMessaging = RealtimeMessagingService.shared
 
     let conversationId: String
     let otherUserId: String  // 添加对方用户ID参数
 
-    @State private var messages: [Message] = []
+    @State private var messages: [EnhancedMessage] = []
     @State private var inputText = ""
     @State private var isLoading = false
     @State private var isSending = false
@@ -37,6 +38,9 @@ struct ChatView: View {
     // 语音录制
     @State private var recorder: AVAudioRecorder?
     @State private var isRecording = false
+    
+    // 输入状态
+    @State private var typingTimer: Timer?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -65,8 +69,11 @@ struct ChatView: View {
                         }
 
                         ForEach(messages) { msg in
-                            MessageBubble(message: msg, isMine: msg.senderId == authService.currentUser?.id)
-                                .id(msg.id)
+                            EnhancedMessageBubble(
+                                message: msg, 
+                                isMine: msg.senderId == authService.currentUser?.id
+                            )
+                            .id(msg.id)
                         }
                     }
                     .padding(.horizontal, 12)
@@ -88,10 +95,16 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await initialLoad()
-            await subscribe()
+            await realtimeMessaging.subscribeToConversation(conversationId)
+        }
+        .onReceive(realtimeMessaging.$conversations) { conversations in
+            if let conversationMessages = conversations[conversationId] {
+                messages = conversationMessages.sorted { $0.createdAt < $1.createdAt }
+            }
         }
         .onDisappear {
-            Task { await RealtimeService.shared.unsubscribeConversationMessages(conversationId: conversationId) }
+            realtimeMessaging.unsubscribeFromConversation(conversationId)
+            typingTimer?.invalidate()
         }
         .alert("提示", isPresented: $showAlert) {
             Button("确定", role: .cancel) {}
@@ -130,6 +143,9 @@ struct ChatView: View {
             TextField("输入消息…", text: $inputText, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...4)
+                .onChange(of: inputText) { _, newValue in
+                    handleTyping(newValue)
+                }
 
             if isUploading {
                 ProgressView().frame(width: 20, height: 20)
@@ -163,7 +179,23 @@ struct ChatView: View {
         isLoading = true
         do {
             let firstPage = try await supabaseService.fetchMessages(conversationId: conversationId, limit: pageSize, offset: 0)
-            messages = firstPage
+            // Convert Message -> EnhancedMessage for initial load to match UI model
+            let enhanced: [EnhancedMessage] = firstPage.map { m in
+                EnhancedMessage(
+                    id: m.id,
+                    conversationId: m.conversationId,
+                    senderId: m.senderId,
+                    receiverId: m.receiverId,
+                    sender: m.sender,
+                    content: m.content,
+                    messageType: m.messageType,
+                    status: .sent,
+                    isRead: m.isRead,
+                    createdAt: m.createdAt,
+                    updatedAt: m.updatedAt
+                )
+            }
+            messages = enhanced
             loadedCount = firstPage.count
             hasMore = firstPage.count == pageSize
 
@@ -187,7 +219,23 @@ struct ChatView: View {
 
         do {
             let nextPage = try await supabaseService.fetchMessages(conversationId: conversationId, limit: pageSize, offset: loadedCount)
-            messages.insert(contentsOf: nextPage, at: 0)
+            // Convert Message -> EnhancedMessage for pagination
+            let enhancedNext: [EnhancedMessage] = nextPage.map { m in
+                EnhancedMessage(
+                    id: m.id,
+                    conversationId: m.conversationId,
+                    senderId: m.senderId,
+                    receiverId: m.receiverId,
+                    sender: m.sender,
+                    content: m.content,
+                    messageType: m.messageType,
+                    status: .sent,
+                    isRead: m.isRead,
+                    createdAt: m.createdAt,
+                    updatedAt: m.updatedAt
+                )
+            }
+            messages.insert(contentsOf: enhancedNext, at: 0)
             loadedCount += nextPage.count
             hasMore = nextPage.count == pageSize
 
@@ -205,55 +253,84 @@ struct ChatView: View {
         isLoadingMore = false
     }
 
-    private func subscribe() async {
-        await RealtimeService.shared.subscribeToConversationMessages(
-            conversationId: conversationId,
-            onInsert: { newMsg in
-                Task {
-                    var enriched = newMsg
-                    if let sender = try? await supabaseService.fetchUser(id: newMsg.senderId) {
-                        enriched.sender = sender
-                    }
-                    messages.append(enriched)
-
-                    if let uid = authService.currentUser?.id, newMsg.receiverId == uid {
-                        try? await supabaseService.markMessageAsRead(messageId: newMsg.id)
-                        await refreshUnreadMessagesCount()
-                    }
-                }
+    // MARK: - 输入状态处理
+    
+    private func handleTyping(_ text: String) {
+        guard let currentUserId = authService.currentUser?.id else { return }
+        
+        // 取消之前的计时器
+        typingTimer?.invalidate()
+        
+        if !text.isEmpty {
+            // 开始输入
+            realtimeMessaging.startTyping(conversationId: conversationId, userId: currentUserId)
+            
+            // 设置停止输入的计时器
+            typingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
+                realtimeMessaging.stopTyping(conversationId: conversationId, userId: currentUserId)
             }
-        )
+        } else {
+            // 立即停止输入状态
+            realtimeMessaging.stopTyping(conversationId: conversationId, userId: currentUserId)
+        }
     }
 
-    // MARK: - Send
-
+    // MARK: - 优化的消息发送
+    
     private func sendText() async {
-        guard let uid = authService.currentUser?.id else {
-            alertMessage = "请先登录"
-            showAlert = true
+        guard let currentUser = authService.currentUser else {
+            await MainActor.run {
+                alertMessage = "请先登录"
+                showAlert = true
+            }
             return
         }
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
 
-        isSending = true
-        inputText = ""  // 立即清空输入框，提升体验
+        let trimmedText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+
+        // 防止重复发送
+        guard !isSending else { return }
+
+        await MainActor.run {
+            isSending = true
+        }
+
+        let messageText = trimmedText
+        await MainActor.run {
+            inputText = "" // 立即清空输入框
+        }
+
+        // 停止输入状态
+        realtimeMessaging.stopTyping(conversationId: conversationId, userId: currentUser.id)
 
         do {
-            let message = try await supabaseService.sendMessage(
+            // 使用新的实时消息服务发送（支持乐观更新）
+            _ = try await realtimeMessaging.sendMessage(
                 conversationId: conversationId,
-                senderId: uid,
-                receiverId: otherUserId,  // 直接使用传入的otherUserId
-                content: text,
+                senderId: currentUser.id,
+                receiverId: otherUserId,
+                content: messageText,
                 messageType: .text
             )
-            messages.append(message)
+
+            // 添加触觉反馈
+            await MainActor.run {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+
         } catch {
-            alertMessage = "发送失败：\(error.localizedDescription)"
-            showAlert = true
-            inputText = text  // 发送失败时恢复输入内容
+            await MainActor.run {
+                alertMessage = "发送失败：\(error.localizedDescription)"
+                showAlert = true
+                inputText = messageText // 恢复输入内容
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
         }
-        isSending = false
+
+        await MainActor.run {
+            isSending = false
+        }
     }
 
     private func handlePickedPhoto() async {
@@ -338,7 +415,21 @@ struct ChatView: View {
             content: urlString,
             messageType: type
         )
-        messages.append(message)
+        // Convert server Message -> EnhancedMessage before appending for consistency
+        let enhanced = EnhancedMessage(
+            id: message.id,
+            conversationId: message.conversationId,
+            senderId: message.senderId,
+            receiverId: message.receiverId,
+            sender: message.sender,
+            content: message.content,
+            messageType: message.messageType,
+            status: .sent,
+            isRead: message.isRead,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt
+        )
+        messages.append(enhanced)
     }
 
     // MARK: - Helpers
@@ -351,10 +442,10 @@ struct ChatView: View {
     }
 }
 
-// MARK: - Message Bubble
+// MARK: - Enhanced Message Bubble
 
-private struct MessageBubble: View {
-    let message: Message
+private struct EnhancedMessageBubble: View {
+    let message: EnhancedMessage
     let isMine: Bool
 
     @State private var audioPlayer: AVAudioPlayer?
@@ -370,11 +461,17 @@ private struct MessageBubble: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
                 
-                // 时间戳
-                Text(formatTime(message.createdAt))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
+                // 时间和状态
+                HStack(spacing: 4) {
+                    Text(formatTime(message.createdAt))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    
+                    if isMine {
+                        messageStatusIcon
+                    }
+                }
+                .padding(.horizontal, 4)
             }
             
             if !isMine { Spacer(minLength: 60) }
@@ -387,13 +484,45 @@ private struct MessageBubble: View {
         if isMine {
             AnyView(
                 LinearGradient(
-                    colors: [Color.blue, Color.blue.opacity(0.8)],
+                    colors: message.status == .failed ? 
+                        [Color.red.opacity(0.8), Color.red.opacity(0.6)] :
+                        [Color.blue, Color.blue.opacity(0.8)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
             )
         } else {
             AnyView(Color(.systemGray6))
+        }
+    }
+    
+    @ViewBuilder
+    private var messageStatusIcon: some View {
+        switch message.status {
+        case .sending:
+            ProgressView()
+                .scaleEffect(0.6)
+                .tint(.white.opacity(0.8))
+        case .sent:
+            Image(systemName: "checkmark")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.8))
+        case .delivered:
+            Image(systemName: "checkmark.circle")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.8))
+        case .read:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.white)
+        case .failed:
+            Button {
+                // 重试发送逻辑
+            } label: {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.white)
+            }
         }
     }
     

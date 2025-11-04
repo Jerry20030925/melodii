@@ -9,6 +9,7 @@ import SwiftUI
 import Combine
 import PhotosUI
 import AVFoundation
+import UIKit
 
 struct CreateView: View {
     // 外部传入：草稿（可选）
@@ -27,17 +28,26 @@ struct CreateView: View {
 
     // 选项区状态
     @State private var city: String = ""
-    @State private var isLocating: Bool = false
     @State private var isAnonymous: Bool = false
 
     // 其它 UI 状态
     @State private var isSubmitting: Bool = false
+    @State private var publishProgress: Double = 0.0
+    @State private var publishStep: String = ""
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
+    @State private var showLocationPermissionAlert: Bool = false
 
     // 媒体选择/上传
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var isUploading: Bool = false
+    @State private var uploadProgress: Double = 0.0
+    @State private var uploadingCount: Int = 0
+    @State private var totalUploadCount: Int = 0
+
+    // 上传体积阈值（根据 Supabase Storage 典型限制做保守设置）
+    private let maxImageBytes: Int = 4 * 1024 * 1024     // 4MB
+    private let maxVideoBytes: Int = 25 * 1024 * 1024    // 25MB（超过则提示压缩/截取）
 
     // 全屏预览
     @State private var showViewer = false
@@ -56,38 +66,70 @@ struct CreateView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
-                    // 文本输入
-                    TextEditor(text: $text)
-                        .frame(minHeight: 140)
-                        .padding(12)
-                        .background(Color(.systemGray6))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            ZStack(alignment: .topLeading) {
-                                if text.isEmpty {
-                                    Text("说点什么…")
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 20)
-                                        .padding(.vertical, 16)
-                                        .allowsHitTesting(false)
+                VStack(spacing: 20) {
+                    // 文本输入区域
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("内容")
+                                .font(.headline)
+                                .fontWeight(.semibold)
+                            
+                            Spacer()
+                            
+                            Text("\(text.count)/500")
+                                .font(.caption)
+                                .foregroundStyle(text.count > 450 ? .red : .secondary)
+                        }
+                        
+                        TextEditor(text: $text)
+                            .frame(minHeight: 160)
+                            .padding(16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color(.systemBackground))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 16)
+                                            .stroke(
+                                                isTextEditorFocused ? Color.blue.opacity(0.3) : Color(.systemGray4), 
+                                                lineWidth: 1.5
+                                            )
+                                    )
+                            )
+                            .overlay(
+                                ZStack(alignment: .topLeading) {
+                                    if text.isEmpty {
+                                        Text("分享你的想法、心情或有趣的事情...")
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 24)
+                                            .padding(.vertical, 24)
+                                            .allowsHitTesting(false)
+                                    }
                                 }
-                            }
-                        )
-                        .focused($isTextEditorFocused)
-                        .scrollContentBackground(.hidden)
+                            )
+                            .focused($isTextEditorFocused)
+                            .scrollContentBackground(.hidden)
+                            .animation(.easeInOut(duration: 0.2), value: isTextEditorFocused)
+                    }
 
-                    // 媒体网格 + 选择器
-                    mediaSection
+                    // 媒体部分
+                    if !mediaURLs.isEmpty || !isUploading {
+                        mediaSection
+                    }
 
                     // 选项区（定位 + 匿名）
                     optionsSection
 
-                    // 话题与标签（占位）
-                    tagsSection
+                    // 话题与标签
+                    if !topics.isEmpty || !moodTags.isEmpty {
+                        tagsSection
+                    }
+                    
+                    // 底部间距
+                    Spacer(minLength: 100)
                 }
-                .padding(16)
+                .padding(20)
             }
+            .background(Color(.systemGroupedBackground))
             .contentShape(Rectangle())
             .onTapGesture {
                 isTextEditorFocused = false
@@ -131,29 +173,154 @@ struct CreateView: View {
                     isAnonymous = draft.isAnonymous
                 }
             }
-            .onReceive(locationService.$currentCity.compactMap { $0 }) { newCity in
-                city = newCity
-                isLocating = false
-            }
             .alert("提示", isPresented: $showAlert) {
                 Button("确定", role: .cancel) {}
             } message: {
                 Text(alertMessage)
             }
+            .alert("需要位置权限", isPresented: $showLocationPermissionAlert) {
+                Button("取消", role: .cancel) {}
+                Button("去设置") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            } message: {
+                Text("请在系统设置中允许Melodii访问您的位置信息")
+            }
             .sheet(isPresented: $showViewer) {
                 FullscreenMediaViewer(urls: mediaURLs, isPresented: $showViewer, index: viewerIndex)
             }
+            .overlay(
+                // 发布进度覆盖层
+                publishProgressOverlay
+            )
+            .onChange(of: locationService.currentCity) { oldValue, newValue in
+                // 当获取到城市信息时，更新city状态并显示动画
+                if let newCity = newValue, !newCity.isEmpty {
+                    withAnimation(.spring(response: 0.5, dampingFraction: 0.75)) {
+                        city = newCity
+                    }
+                    // 成功反馈
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
+            }
+            .onChange(of: locationService.locationError) { oldValue, newValue in
+                // 当出现位置错误时，显示提示
+                if let error = newValue, !error.isEmpty {
+                    // 检查是否是权限问题
+                    if error.contains("权限") || error.contains("授权") {
+                        showLocationPermissionAlert = true
+                    } else {
+                        alertMessage = error
+                        showAlert = true
+                    }
+                    // 错误反馈
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Progress Overlay
+    
+    @ViewBuilder
+    private var publishProgressOverlay: some View {
+        if isSubmitting {
+            ZStack {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                
+                VStack(spacing: 24) {
+                    // 进度圆环
+                    ZStack {
+                        Circle()
+                            .stroke(Color.white.opacity(0.2), lineWidth: 8)
+                            .frame(width: 80, height: 80)
+                        
+                        Circle()
+                            .trim(from: 0, to: publishProgress)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.blue, .purple],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                style: StrokeStyle(lineWidth: 8, lineCap: .round)
+                            )
+                            .frame(width: 80, height: 80)
+                            .rotationEffect(.degrees(-90))
+                            .animation(.easeInOut(duration: 0.5), value: publishProgress)
+                        
+                        Text("\(Int(publishProgress * 100))%")
+                            .font(.headline)
+                            .fontWeight(.bold)
+                            .foregroundStyle(.white)
+                    }
+                    
+                    VStack(spacing: 8) {
+                        Text("正在发布...")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.white)
+                        
+                        Text(publishStep)
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding(40)
+                .background(
+                    RoundedRectangle(cornerRadius: 20)
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20)
+                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                        )
+                )
+                .scaleEffect(isSubmitting ? 1.0 : 0.8)
+                .opacity(isSubmitting ? 1.0 : 0.0)
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isSubmitting)
+            }
+            .transition(.opacity)
         }
     }
 
     // MARK: - 媒体区域
 
     private var mediaSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            MediaHeader(isUploading: isUploading)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("媒体")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                
+                Spacer()
+                
+                if isUploading {
+                    VStack(spacing: 4) {
+                        HStack(spacing: 8) {
+                            ProgressView(value: uploadProgress)
+                                .frame(width: 60)
+                                .tint(.blue)
+                            Text("\(Int(uploadProgress * 100))%")
+                                .font(.caption2)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.blue)
+                        }
+                        Text("上传中 \(uploadingCount)/\(totalUploadCount)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if !mediaURLs.isEmpty {
+                    Text("\(mediaURLs.count)/9")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
-            // 网格预览
-            LazyVGrid(columns: Self.mediaGridColumns, spacing: 8) {
+            LazyVGrid(columns: Self.mediaGridColumns, spacing: 12) {
                 ForEach(Array(mediaURLs.enumerated()), id: \.offset) { pair in
                     let idx = pair.offset
                     let url = pair.element
@@ -165,7 +332,7 @@ struct CreateView: View {
                             showViewer = true
                         },
                         onRemove: {
-                            withAnimation(.easeInOut) {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                                 if idx < mediaURLs.count && mediaURLs[idx] == url {
                                     mediaURLs.remove(at: idx)
                                 } else if let currentIndex = mediaURLs.firstIndex(of: url) {
@@ -176,21 +343,33 @@ struct CreateView: View {
                     )
                 }
 
-                // 添加按钮（提取为独立视图以减轻类型推断压力）
-                MediaPickerTile(
-                    selection: $pickerItems,
-                    onPicked: { items in
-                        Task { await handlePickedItems(items) }
-                    }
-                )
+                // 添加媒体按钮
+                if mediaURLs.count < 9 {
+                    MediaPickerTile(
+                        selection: $pickerItems,
+                        onPicked: { items in
+                            Task { await handlePickedItems(items) }
+                        }
+                    )
+                }
             }
         }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.systemBackground))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(.systemGray5), lineWidth: 1)
+                )
+        )
     }
 
     // MARK: - 选项区（定位 + 匿名）
 
     private var optionsSection: some View {
         VStack(spacing: 20) {
+            // 定位按钮
             Button {
                 requestLocation()
             } label: {
@@ -199,87 +378,150 @@ struct CreateView: View {
                         Circle()
                             .fill(
                                 LinearGradient(
-                                    colors: [.green.opacity(0.15), .mint.opacity(0.15)],
+                                    colors: city.isEmpty ? 
+                                        [.green.opacity(0.15), .mint.opacity(0.15)] :
+                                        [.green.opacity(0.25), .mint.opacity(0.25)],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
                                 )
                             )
-                            .frame(width: 40, height: 40)
+                            .frame(width: 44, height: 44)
+                            .overlay(
+                                Circle()
+                                    .stroke(city.isEmpty ? Color.clear : Color.green.opacity(0.3), lineWidth: 2)
+                            )
 
-                        if isLocating {
+                        if locationService.isLocating {
                             ProgressView()
                                 .tint(.green)
+                                .scaleEffect(0.9)
                         } else {
-                            Image(systemName: "location.fill")
-                                .font(.system(size: 18))
+                            Image(systemName: city.isEmpty ? "location" : "location.fill")
+                                .font(.system(size: 20, weight: .medium))
                                 .foregroundStyle(.green)
+                                .symbolEffect(.pulse, value: locationService.isLocating)
                         }
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(city.isEmpty ? "添加位置" : city)
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(.primary)
-                        Text(isLocating ? "正在定位..." : (city.isEmpty ? "点击获取当前位置" : "点击重新定位"))
+                        HStack(spacing: 6) {
+                            Text(city.isEmpty ? "添加位置" : city)
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            
+                            if !city.isEmpty && !locationService.isLocating {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                        }
+                        
+                        Text(locationService.isLocating ? "正在获取位置信息..." :
+                             (city.isEmpty ? "点击获取当前位置" : "点击重新定位"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(2)
                     }
 
                     Spacer()
 
-                    if !city.isEmpty && !isLocating {
+                    if !city.isEmpty && !locationService.isLocating {
                         Button {
-                            withAnimation(.spring(response: 0.3)) {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                                 city = ""
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             }
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 20))
+                                .font(.system(size: 22))
                                 .foregroundStyle(.secondary)
                         }
                         .transition(.scale.combined(with: .opacity))
                     }
                 }
-                .padding(16)
+                .padding(18)
                 .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(city.isEmpty ? Color(.systemGray6) : Color.green.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(city.isEmpty ? Color(.systemGray6) : Color.green.opacity(0.06))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(
+                                    city.isEmpty ? Color.clear : Color.green.opacity(0.2), 
+                                    lineWidth: 1.5
+                                )
+                        )
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(city.isEmpty ? Color.clear : Color.green.opacity(0.2), lineWidth: 1)
-                )
-                .animation(.easeInOut(duration: 0.2), value: city)
-                .animation(.easeInOut(duration: 0.2), value: isLocating)
+                .scaleEffect(locationService.isLocating ? 1.02 : 1.0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: city)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: locationService.isLocating)
             }
-            .disabled(isLocating)
+            .disabled(locationService.isLocating)
             .buttonStyle(.plain)
 
+            // 匿名发布开关
             Toggle(isOn: $isAnonymous) {
                 HStack(spacing: 12) {
-                    Image(systemName: isAnonymous ? "person.fill.questionmark" : "person.fill")
-                        .foregroundStyle(isAnonymous ? .purple : .secondary)
-                        .frame(width: 24)
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: isAnonymous ? 
+                                        [.purple.opacity(0.25), .indigo.opacity(0.25)] :
+                                        [.gray.opacity(0.15), .gray.opacity(0.15)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 44, height: 44)
+                            .overlay(
+                                Circle()
+                                    .stroke(isAnonymous ? Color.purple.opacity(0.3) : Color.clear, lineWidth: 2)
+                            )
+                        
+                        Image(systemName: isAnonymous ? "person.fill.questionmark" : "person.fill")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(isAnonymous ? .purple : .secondary)
+                            .symbolEffect(.bounce, value: isAnonymous)
+                    }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("匿名发布")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                        Text(isAnonymous ? "已启用匿名模式" : "隐藏你的个人信息")
+                        HStack(spacing: 6) {
+                            Text("匿名发布")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                            
+                            if isAnonymous {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.purple)
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                        }
+                        
+                        Text(isAnonymous ? "已启用匿名模式，将隐藏个人信息" : "隐藏你的个人信息")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(2)
                     }
                 }
             }
             .tint(.purple)
-            .padding(16)
+            .padding(18)
             .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isAnonymous ? Color.purple.opacity(0.1) : Color(.systemGray6))
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(isAnonymous ? Color.purple.opacity(0.06) : Color(.systemGray6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(
+                                isAnonymous ? Color.purple.opacity(0.2) : Color.clear, 
+                                lineWidth: 1.5
+                            )
+                    )
             )
-            .animation(.easeInOut(duration: 0.2), value: isAnonymous)
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isAnonymous)
         }
     }
 
@@ -327,17 +569,25 @@ struct CreateView: View {
 
     // MARK: - Actions
 
+    // MARK: - Location Functions
+    
     private func requestLocation() {
-        guard !isLocating else { return }
-        isLocating = true
-        city = ""
-        locationService.requestCity()
-        Task {
-            try? await Task.sleep(nanoseconds: 8 * NSEC_PER_SEC)
-            if isLocating {
-                isLocating = false
-            }
+        guard !locationService.isLocating else { return }
+
+        // 添加触觉反馈
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        // 清空当前城市和错误
+        withAnimation(.easeOut(duration: 0.2)) {
+            city = ""
         }
+
+        // 清除旧的位置信息
+        locationService.currentCity = nil
+        locationService.locationError = nil
+
+        // 请求定位
+        locationService.requestCity()
     }
 
     private func submit() async {
@@ -347,11 +597,27 @@ struct CreateView: View {
             return
         }
 
+        // 重置进度
+        publishProgress = 0.0
+        publishStep = "准备发布..."
         isSubmitting = true
-        defer { isSubmitting = false }
+        
+        // 添加触觉反馈
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        
+        defer { 
+            isSubmitting = false
+            publishProgress = 0.0
+            publishStep = ""
+        }
 
         do {
             if let draft = draftPost {
+                // 更新草稿流程
+                await updateProgress(0.2, "验证内容...")
+                try await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                
+                await updateProgress(0.5, "更新草稿...")
                 try await supabaseService.updatePostFull(
                     id: draft.id,
                     text: text,
@@ -362,9 +628,22 @@ struct CreateView: View {
                     mediaURLs: mediaURLs,
                     status: .published
                 )
-                alertMessage = "已更新草稿"
+                
+                await updateProgress(1.0, "更新完成！")
+                try await Task.sleep(nanoseconds: 500_000_000) // 500ms
+                
+                alertMessage = "草稿已成功发布！"
                 showAlert = true
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
             } else {
+                // 新发布流程
+                await updateProgress(0.1, "验证内容...")
+                try await Task.sleep(nanoseconds: 300_000_000)
+                
+                await updateProgress(0.3, "处理媒体文件...")
+                try await Task.sleep(nanoseconds: 400_000_000)
+                
+                await updateProgress(0.6, "创建帖子...")
                 _ = try await supabaseService.createPost(
                     authorId: userId,
                     text: text.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -374,65 +653,207 @@ struct CreateView: View {
                     city: city.isEmpty ? nil : city,
                     isAnonymous: isAnonymous
                 )
+                
+                await updateProgress(0.9, "同步数据...")
+                try await Task.sleep(nanoseconds: 300_000_000)
+                
+                await updateProgress(1.0, "发布成功！")
+                try await Task.sleep(nanoseconds: 500_000_000)
+                
+                // 清空表单
                 text = ""
                 mediaURLs = []
                 topics = []
                 moodTags = []
                 city = ""
                 isAnonymous = false
-                alertMessage = "发布成功！"
+                
+                alertMessage = "发布成功！你的动态已经发布到社区"
                 showAlert = true
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
             }
         } catch {
-            alertMessage = "提交失败：\(error.localizedDescription)"
+            await updateProgress(0.0, "发布失败")
+            alertMessage = "发布失败：\(error.localizedDescription)"
             showAlert = true
             UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+    }
+    
+    // MARK: - Progress Helper
+    
+    @MainActor
+    private func updateProgress(_ progress: Double, _ step: String) async {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            publishProgress = progress
+            publishStep = step
         }
     }
 
     private func handlePickedItems(_ items: [PhotosPickerItem]) async {
         guard let userId = authService.currentUser?.id else { return }
+        
+        // 重置上传状态
         isUploading = true
-        defer { isUploading = false; pickerItems = [] }
+        uploadProgress = 0.0
+        uploadingCount = 0
+        totalUploadCount = items.count
+        
+        defer { 
+            isUploading = false
+            uploadProgress = 0.0
+            uploadingCount = 0
+            totalUploadCount = 0
+            pickerItems = []
+        }
 
-        for item in items {
+        var newURLs: [String] = []
+        
+        for (index, item) in items.enumerated() {
+            // 更新当前上传项目
+            uploadingCount = index + 1
+            
             // 判断类型
             let supported = item.supportedContentTypes
             let isVideo = supported.contains(where: { $0.conforms(to: .movie) })
+            
             do {
+                // 模拟上传进度
+                let baseProgress = Double(index) / Double(totalUploadCount)
+                let itemProgress = 1.0 / Double(totalUploadCount)
+                
+                // 上传开始
+                await updateUploadProgress(baseProgress + itemProgress * 0.1)
+                
                 if isVideo {
-                    // 尝试拿到文件数据
+                    // 上传视频（真实进度）
+                    await updateUploadProgress(baseProgress + itemProgress * 0.1)
                     if let data = try await item.loadTransferable(type: Data.self) {
-                        let url = try await supabaseService.uploadPostMedia(
+                        // 体积预检
+                        if data.count > maxVideoBytes {
+                            throw NSError(domain: "Create", code: 413, userInfo: [NSLocalizedDescriptionKey: "视频过大，建议截取更短片段或压缩后再试（≤25MB）"])
+                        }
+
+                        let url = try await supabaseService.uploadPostMediaWithProgress(
                             data: data,
                             mime: "video/mp4",
                             fileName: nil,
-                            folder: "posts/\(userId)/videos"
+                            folder: "posts/\(userId)/videos",
+                            bucket: "media",
+                            isPublic: true,
+                            onProgress: { p in
+                                Task { await updateUploadProgress(baseProgress + itemProgress * p) }
+                            }
                         )
-                        mediaURLs.append(url)
+
+                        newURLs.append(url)
+                        await MainActor.run {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                mediaURLs.append(url)
+                            }
+                        }
                     } else {
                         throw NSError(domain: "Create", code: -21, userInfo: [NSLocalizedDescriptionKey: "无法读取视频数据"])
                     }
                 } else {
-                    // 图片压缩为JPEG
-                    if let data = try await item.loadTransferable(type: Data.self) {
-                        let url = try await supabaseService.uploadPostMedia(
-                            data: data,
+                    // 上传图片：先压缩到目标体积，再走带进度上传
+                    await updateUploadProgress(baseProgress + itemProgress * 0.1)
+                    if let rawData = try await item.loadTransferable(type: Data.self), let image = UIImage(data: rawData) {
+                        let compressed = try await compressImageDataIfNeeded(image: image, maxBytes: maxImageBytes)
+
+                        let url = try await supabaseService.uploadPostMediaWithProgress(
+                            data: compressed,
                             mime: "image/jpeg",
                             fileName: nil,
-                            folder: "posts/\(userId)/images"
+                            folder: "posts/\(userId)/images",
+                            bucket: "media",
+                            isPublic: true,
+                            onProgress: { p in
+                                Task { await updateUploadProgress(baseProgress + itemProgress * p) }
+                            }
                         )
-                        mediaURLs.append(url)
+                        newURLs.append(url)
+                        
+                        // 添加到媒体列表
+                        await MainActor.run {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                mediaURLs.append(url)
+                            }
+                        }
                     } else {
                         throw NSError(domain: "Create", code: -22, userInfo: [NSLocalizedDescriptionKey: "无法读取图片数据"])
                     }
                 }
+                
+                // 上传完成
+                await updateUploadProgress(baseProgress + itemProgress)
+                
             } catch {
-                alertMessage = "上传失败：\(error.localizedDescription)"
+                let msg = error.localizedDescription
+                if msg.contains("maximum allowed size") || (error as NSError).code == 413 {
+                    alertMessage = "上传失败：文件过大。请压缩后再试。建议照片≤4MB、视频≤25MB。"
+                } else {
+                    alertMessage = "上传失败：\(msg)"
+                }
                 showAlert = true
             }
         }
+        
+        // 添加成功反馈
+        if !newURLs.isEmpty {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
+    }
+
+    // MARK: - Upload Progress Helper
+    
+    @MainActor
+    private func updateUploadProgress(_ progress: Double) async {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            uploadProgress = progress
+        }
+    }
+
+    // MARK: - Image Compression Helpers
+
+    /// 压缩图片至不超过 maxBytes（优先降低质量，其次等比缩放）
+    private func compressImageDataIfNeeded(image: UIImage, maxBytes: Int) async throws -> Data {
+        // 先尝试质量压缩
+        var quality: CGFloat = 0.85
+        var data = image.jpegData(compressionQuality: quality)
+        if let d = data, d.count <= maxBytes { return d }
+
+        // 逐步降低质量直到 0.4
+        while quality > 0.4 {
+            quality -= 0.1
+            data = image.jpegData(compressionQuality: quality)
+            if let d = data, d.count <= maxBytes { return d }
+        }
+
+        // 仍超限则按比例缩放（最长边限制到 1280）
+        let targetMaxSide: CGFloat = 1280
+        let size = image.size
+        let maxSide = max(size.width, size.height)
+        let scale = min(1.0, targetMaxSide / maxSide)
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+
+        UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
+        image.draw(in: CGRect(origin: .zero, size: newSize))
+        let scaled = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+
+        guard let scaledImage = scaled, let scaledData = scaledImage.jpegData(compressionQuality: 0.7) else {
+            throw NSError(domain: "Compression", code: -1, userInfo: [NSLocalizedDescriptionKey: "图片压缩失败"])
+        }
+
+        if scaledData.count <= maxBytes { return scaledData }
+
+        // 最后兜底再降到 0.5
+        if let finalData = scaledImage.jpegData(compressionQuality: 0.5), finalData.count <= maxBytes {
+            return finalData
+        }
+        // 仍超限则抛错，让上层提示用户换更小图片
+        throw NSError(domain: "Compression", code: 413, userInfo: [NSLocalizedDescriptionKey: "图片过大，压缩后仍超过上限（≤4MB）"])
     }
 }
 
@@ -541,46 +962,40 @@ private struct MediaThumb: View {
     let urlString: String
 
     private func isVideo(_ url: String) -> Bool {
-        let lower = url.lowercased()
-        return lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || lower.hasSuffix(".m4v")
+        return url.isVideoURL // 使用扩展中的统一检测方法
     }
 
     var body: some View {
         ZStack {
             if isVideo(urlString) {
-                // 视频缩略 + 播放图标
+                // 视频缩略图 + 播放图标
                 ZStack {
-                    AsyncImage(url: URL(string: urlString)) { phase in
-                        switch phase {
-                        case .empty:
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color(.systemGray6))
-                                .overlay(ProgressView())
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
-                        case .failure:
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color(.systemGray6))
-                                .overlay(Image(systemName: "video.slash").foregroundStyle(.secondary))
-                        @unknown default:
-                            EmptyView()
-                        }
+                    // 使用视频第一帧作为缩略图
+                    VideoThumbnailView(urlString: urlString)
+                    
+                    // 播放图标覆盖层
+                    ZStack {
+                        Circle()
+                            .fill(Color.black.opacity(0.6))
+                            .frame(width: 36, height: 36)
+                        
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
                     }
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.white)
-                        .shadow(radius: 2)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
+                // 图片缩略图
                 AsyncImage(url: URL(string: urlString)) { phase in
                     switch phase {
                     case .empty:
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color(.systemGray6))
-                            .overlay(ProgressView())
+                            .overlay(
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                            )
                     case .success(let image):
                         image
                             .resizable()
@@ -588,12 +1003,99 @@ private struct MediaThumb: View {
                     case .failure:
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color(.systemGray6))
-                            .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+                            .overlay(
+                                VStack(spacing: 4) {
+                                    Image(systemName: "photo.badge.exclamationmark")
+                                        .font(.title3)
+                                        .foregroundStyle(.red)
+                                    Text("加载失败")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            )
                     @unknown default:
                         EmptyView()
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+}
+
+// MARK: - 视频缩略图视图
+
+private struct VideoThumbnailView: View {
+    let urlString: String
+    @State private var thumbnail: UIImage?
+    @State private var isLoading = true
+    @State private var hasError = false
+    
+    var body: some View {
+        ZStack {
+            if let thumbnail = thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+            } else if hasError {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(.systemGray6))
+                    .overlay(
+                        VStack(spacing: 4) {
+                            Image(systemName: "video.badge.exclamationmark")
+                                .font(.title3)
+                                .foregroundStyle(.orange)
+                            Text("视频")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    )
+            } else if isLoading {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(.systemGray6))
+                    .overlay(
+                        VStack(spacing: 4) {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("加载中...")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    )
+            }
+        }
+        .onAppear {
+            generateThumbnail()
+        }
+    }
+    
+    private func generateThumbnail() {
+        guard let url = URL(string: urlString) else {
+            hasError = true
+            isLoading = false
+            return
+        }
+        
+        Task {
+            do {
+                let asset = AVAsset(url: url)
+                let imageGenerator = AVAssetImageGenerator(asset: asset)
+                imageGenerator.appliesPreferredTrackTransform = true
+                imageGenerator.maximumSize = CGSize(width: 200, height: 200)
+                
+                let time = CMTime(seconds: 1, preferredTimescale: 600)
+                let cgImage = try await imageGenerator.image(at: time).image
+                
+                await MainActor.run {
+                    thumbnail = UIImage(cgImage: cgImage)
+                    isLoading = false
+                }
+            } catch {
+                print("生成视频缩略图失败: \(error)")
+                await MainActor.run {
+                    hasError = true
+                    isLoading = false
+                }
             }
         }
     }

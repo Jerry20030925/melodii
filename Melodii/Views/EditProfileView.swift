@@ -22,6 +22,11 @@ struct EditProfileView: View {
     @State private var bio: String
     @State private var interests: [String]
     @State private var interestInput = ""
+    
+    // MID编辑相关
+    @State private var mid: String
+    @State private var isEditingMid = false
+    @State private var midValidationResult: MIDValidationResult?
 
     // 头像
     @State private var avatarImage: UIImage?
@@ -40,6 +45,7 @@ struct EditProfileView: View {
         _nickname = State(initialValue: user.nickname)
         _bio = State(initialValue: user.bio ?? "")
         _interests = State(initialValue: user.interests)
+        _mid = State(initialValue: user.mid ?? "")
     }
 
     var body: some View {
@@ -188,6 +194,7 @@ struct EditProfileView: View {
 
     private var basicInfoSection: some View {
         VStack(alignment: .leading, spacing: 16) {
+            // 昵称输入
             VStack(alignment: .leading, spacing: 8) {
                 Text("昵称")
                     .font(.subheadline)
@@ -201,21 +208,90 @@ struct EditProfileView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
             }
 
+            // MID编辑
             VStack(alignment: .leading, spacing: 8) {
-                Text("MID（不可修改）")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.secondary)
-
-                Text(user.mid ?? "未设置")
-                    .font(.body)
-                    .foregroundColor(.blue)
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                HStack {
+                    Text("MID")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
+                    
+                    Spacer()
+                    
+                    if user.canUpdateMid {
+                        Button(isEditingMid ? "取消" : "编辑") {
+                            withAnimation(.easeInOut(duration: 0.3)) {
+                                isEditingMid.toggle()
+                                if !isEditingMid {
+                                    // 取消编辑，恢复原值
+                                    mid = user.mid ?? ""
+                                    midValidationResult = nil
+                                }
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                    }
+                }
+                
+                if isEditingMid {
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("输入MID（英文数字，最多8位）", text: $mid)
+                            .textFieldStyle(.plain)
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color(.systemGray6))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(
+                                                midValidationResult?.isValid == false ? Color.red.opacity(0.5) : Color.clear,
+                                                lineWidth: 1
+                                            )
+                                    )
+                            )
+                            .onChange(of: mid) { _, newValue in
+                                let formatted = newValue.formattedMID
+                                if formatted != newValue {
+                                    mid = formatted
+                                }
+                                midValidationResult = MIDValidationResult(input: formatted)
+                            }
+                        
+                        if let validationResult = midValidationResult,
+                           !validationResult.isValid,
+                           let errorMessage = validationResult.errorMessage {
+                            Text(errorMessage)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                        
+                        Text("• 仅支持英文字母和数字\n• 最多8个字符\n• 每半年只能修改一次")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(mid.isEmpty ? "未设置" : mid)
+                            .font(.body)
+                            .foregroundColor(mid.isEmpty ? .secondary : .blue)
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(.systemGray6))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        
+                        if !user.canUpdateMid {
+                            if let waitTime = MIDUpdateFrequencyChecker.remainingWaitTimeDescription(lastUpdateDate: user.lastMidUpdate) {
+                                Text(waitTime)
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                }
             }
 
+            // 个人简介
             VStack(alignment: .leading, spacing: 8) {
                 Text("个人简介")
                     .font(.subheadline)
@@ -297,6 +373,7 @@ struct EditProfileView: View {
         }
 
         isSaving = true
+        defer { isSaving = false }
         print("🔄 开始保存个人资料...")
 
         do {
@@ -323,6 +400,31 @@ struct EditProfileView: View {
                     bucket: "media",
                     isPublic: true
                 )
+            }
+
+            // 更新MID（如果有修改且验证通过）
+            if isEditingMid && mid != (user.mid ?? "") {
+                // 验证MID
+                let validationResult = MIDValidationResult(input: mid)
+                guard validationResult.isValid else {
+                    alertMessage = validationResult.errorMessage ?? "MID格式无效"
+                    showAlert = true
+                    return
+                }
+                
+                // 检查修改频率
+                guard user.canUpdateMid else {
+                    alertMessage = "MID修改过于频繁，请稍后再试"
+                    showAlert = true
+                    return
+                }
+                
+                try await supabaseService.updateUserMID(
+                    userId: user.id,
+                    newMID: mid
+                )
+                
+                isEditingMid = false
             }
 
             try await supabaseService.updateUser(
@@ -354,16 +456,22 @@ struct EditProfileView: View {
                 currentUser.interests = interests
                 currentUser.avatarURL = avatarURL ?? currentUser.avatarURL
                 currentUser.coverImageURL = coverURL ?? currentUser.coverImageURL
+                
+                // 更新MID相关信息
+                if isEditingMid && mid != (user.mid ?? "") {
+                    currentUser.mid = mid
+                    currentUser.lastMidUpdate = Date()
+                }
             }
 
             alertMessage = "保存成功！"
             showAlert = true
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
         } catch {
             alertMessage = "保存失败：\(error.localizedDescription)"
             showAlert = true
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
         }
-
-        isSaving = false
     }
 }
 

@@ -37,30 +37,43 @@ class VideoPreloadManager: ObservableObject {
         
         let task = Task {
             let item = AVPlayerItem(url: videoURL)
-            
+
             // 等待视频准备就绪
-            await withCheckedContinuation { continuation in
-                let observer = item.observe(\.status, options: [.new]) { item, _ in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                var observer: NSKeyValueObservation?
+                var hasResumed = false
+
+                observer = item.observe(\.status, options: [.new]) { item, _ in
+                    guard !hasResumed else { return }
+
                     if item.status == .readyToPlay || item.status == .failed {
+                        hasResumed = true
+                        observer?.invalidate()
                         continuation.resume()
                     }
                 }
-                
+
                 // 设置超时
                 DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-                    observer.invalidate()
+                    guard !hasResumed else { return }
+                    hasResumed = true
+                    observer?.invalidate()
                     continuation.resume()
                 }
             }
-            
+
             if item.status == .readyToPlay {
-                preloadedItems[url] = item
+                await MainActor.run {
+                    preloadedItems[url] = item
+                }
                 print("✅ 视频预加载成功: \(url)")
             } else {
                 print("❌ 视频预加载失败: \(url)")
             }
-            
-            preloadTasks.removeValue(forKey: url)
+
+            await MainActor.run {
+                preloadTasks.removeValue(forKey: url)
+            }
         }
         
         preloadTasks[url] = task

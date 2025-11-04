@@ -17,9 +17,7 @@ struct FullscreenMediaViewer: View {
 
     // 优化的视频格式检测：根据扩展名识别视频
     private func isVideo(_ url: String) -> Bool {
-        let lower = url.lowercased()
-        let videoExtensions = [".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".flv", ".wmv"]
-        return videoExtensions.contains { lower.hasSuffix($0) }
+        return url.isVideoURL // 使用扩展中的统一检测方法
     }
 
     var body: some View {
@@ -242,8 +240,18 @@ private struct VideoPlayerView: View {
                     case .readyToPlay:
                         isLoading = false
                         hasError = false
+                        // 配置音频播放会话，确保视频在全屏预览时声音正常
+                        do {
+                            let session = AVAudioSession.sharedInstance()
+                            try session.setCategory(.playback, mode: .moviePlayback, options: [])
+                            try session.setActive(true)
+                        } catch {
+                            print("⚠️ 配置音频会话失败: \(error)")
+                        }
                         if player == nil {
                             player = AVPlayer(playerItem: item)
+                            player?.isMuted = false
+                            player?.volume = 1.0
                         }
                     case .failed:
                         isLoading = false

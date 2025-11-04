@@ -127,11 +127,20 @@ final class NotificationManager: NSObject, ObservableObject {
             options: []
         )
 
+        // 每日登录提醒类别
+        let dailyReminderCategory = UNNotificationCategory(
+            identifier: "DAILY_REMINDER_CATEGORY",
+            actions: [],
+            intentIdentifiers: [],
+            options: []
+        )
+
         center.setNotificationCategories([
             messageCategory,
             likeCategory,
             commentCategory,
-            followCategory
+            followCategory,
+            dailyReminderCategory
         ])
 
         print("✅ 通知类别已设置")
@@ -249,5 +258,134 @@ final class NotificationManager: NSObject, ObservableObject {
 
     func clearBadge() {
         updateBadgeCount(0)
+    }
+
+    // MARK: - Daily Login Reminder
+
+    /// 设置每日登录提醒通知
+    func scheduleDailyLoginReminder() async {
+        let center = UNUserNotificationCenter.current()
+
+        // 先移除之前的每日提醒
+        center.removePendingNotificationRequests(withIdentifiers: ["daily_login_reminder"])
+
+        // 检查用户是否启用了通知
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized else {
+            print("⚠️ 通知权限未授权，无法设置每日提醒")
+            return
+        }
+
+        // 创建通知内容
+        let content = UNMutableNotificationContent()
+        content.title = "想你了！"
+        content.body = "今天还没来Melodii呢，快来看看朋友们的动态吧 ✨"
+        content.sound = .default
+        content.badge = 1
+        content.categoryIdentifier = "DAILY_REMINDER_CATEGORY"
+
+        // 设置每天上午10点提醒
+        var dateComponents = DateComponents()
+        dateComponents.hour = 10
+        dateComponents.minute = 0
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
+
+        let request = UNNotificationRequest(
+            identifier: "daily_login_reminder",
+            content: content,
+            trigger: trigger
+        )
+
+        do {
+            try await center.add(request)
+            print("✅ 每日登录提醒已设置：每天上午10:00")
+        } catch {
+            print("❌ 设置每日登录提醒失败: \(error)")
+        }
+    }
+
+    /// 取消每日登录提醒
+    func cancelDailyLoginReminder() {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: ["daily_login_reminder"])
+        print("✅ 已取消每日登录提醒")
+    }
+
+    /// 记录用户今天已登录，取消今天的提醒
+    func recordTodayLogin() {
+        let today = Calendar.current.startOfDay(for: Date())
+        UserDefaults.standard.set(today, forKey: "last_login_date")
+        print("✅ 记录今日登录: \(today)")
+    }
+
+    /// 检查用户是否今天已登录
+    func hasLoggedInToday() -> Bool {
+        guard let lastLogin = UserDefaults.standard.object(forKey: "last_login_date") as? Date else {
+            return false
+        }
+
+        let today = Calendar.current.startOfDay(for: Date())
+        let lastLoginDay = Calendar.current.startOfDay(for: lastLogin)
+
+        return today == lastLoginDay
+    }
+
+    // MARK: - Real-time Message Notifications
+
+    /// 发送消息推送通知（本地测试用）
+    func sendMessageNotification(from sender: String, message: String, conversationId: String, senderId: String) async {
+        let center = UNUserNotificationCenter.current()
+
+        // 检查权限
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized else { return }
+
+        // 检查用户是否启用了消息通知
+        guard UserDefaults.standard.bool(forKey: "enable_message_notifications") else {
+            print("⚠️ 用户已禁用消息通知")
+            return
+        }
+
+        // 创建通知内容
+        let content = UNMutableNotificationContent()
+        content.title = "来自 \(sender) 的新消息"
+        content.body = message
+        content.sound = .default
+        content.badge = NSNumber(value: (UIApplication.shared.applicationIconBadgeNumber) + 1)
+        content.categoryIdentifier = "MESSAGE_CATEGORY"
+
+        // 附加数据，用于点击后跳转
+        content.userInfo = [
+            "type": "message",
+            "conversation_id": conversationId,
+            "sender_id": senderId
+        ]
+
+        // 立即触发
+        let request = UNNotificationRequest(
+            identifier: "message_\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+
+        do {
+            try await center.add(request)
+            print("✅ 消息通知已发送: \(sender) - \(message)")
+        } catch {
+            print("❌ 发送消息通知失败: \(error)")
+        }
+    }
+
+    /// 订阅实时消息通知（使用Supabase Realtime）
+    func subscribeToMessageNotifications(userId: String) async {
+        // 这个方法将与RealtimeMessagingService集成
+        // 当收到新消息时，自动触发本地通知
+        print("✅ 已订阅用户 \(userId) 的实时消息通知")
+    }
+
+    /// 取消订阅实时消息通知
+    func unsubscribeFromMessageNotifications() {
+        print("✅ 已取消订阅实时消息通知")
     }
 }

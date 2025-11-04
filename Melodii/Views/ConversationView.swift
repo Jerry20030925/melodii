@@ -8,6 +8,7 @@
 
 import SwiftUI
 import PhotosUI
+import UIKit
 
 struct ConversationView: View {
     let conversation: Conversation
@@ -259,8 +260,8 @@ struct ConversationView: View {
             Divider()
 
             HStack(spacing: 12) {
-                // 图片按钮
-                PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                // 图片和视频按钮
+                PhotosPicker(selection: $selectedPhotoItem, matching: .any(of: [.images, .videos])) {
                     Image(systemName: "photo")
                         .font(.title3)
                         .foregroundStyle(.secondary)
@@ -268,7 +269,7 @@ struct ConversationView: View {
                 .disabled(isUploadingImage)
                 .onChange(of: selectedPhotoItem) { _, newValue in
                     if newValue != nil {
-                        Task { await handleImageSelection() }
+                        Task { await handleMediaSelection() }
                     }
                 }
 
@@ -379,8 +380,8 @@ struct ConversationView: View {
         }
     }
 
-    // 处理图片选择
-    private func handleImageSelection() async {
+    // 处理图片和视频选择
+    private func handleMediaSelection() async {
         guard let item = selectedPhotoItem else { return }
 
         isUploadingImage = true
@@ -392,45 +393,107 @@ struct ConversationView: View {
         }
 
         do {
-            // 加载图片数据
+            // 判断是图片还是视频
+            let supportedTypes = item.supportedContentTypes
+            let isVideo = supportedTypes.contains(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) })
+
+            // 加载媒体数据
             guard let data = try await item.loadTransferable(type: Data.self) else {
-                throw NSError(domain: "ImageLoad", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法加载图片"])
+                throw NSError(domain: "MediaLoad", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法加载媒体文件"])
             }
 
             uploadProgress = 0.3
 
-            // 上传图片
+            // 上传媒体文件
             guard let myId = authService.currentUser?.id else {
                 throw NSError(domain: "Auth", code: -1, userInfo: [NSLocalizedDescriptionKey: "请先登录"])
             }
 
-            let imageUrl = try await supabaseService.uploadPostMedia(
-                data: data,
-                mime: "image/jpeg",
+            let mimeType: String
+            let folder: String
+            let messageType: MessageType
+
+            if isVideo {
+                mimeType = "video/mp4"
+                folder = "messages/\(myId)/videos"
+                messageType = .image // 暂时使用 .image，后续可以扩展 MessageType 添加 .video
+            } else {
+                mimeType = "image/jpeg"
+                folder = "messages/\(myId)/images"
+                messageType = .image
+            }
+
+            // 图片在发送前压缩，视频保持原样但提供体积提示与真实进度
+            var uploadData = data
+            if !isVideo, let image = UIImage(data: data) {
+                uploadData = try await compressImageForMessage(image: image, maxBytes: 4 * 1024 * 1024)
+            }
+
+            let mediaUrl = try await supabaseService.uploadPostMediaWithProgress(
+                data: uploadData,
+                mime: mimeType,
                 fileName: nil,
-                folder: "messages/\(myId)/images"
+                folder: folder,
+                bucket: "media",
+                isPublic: true,
+                onProgress: { p in
+                    DispatchQueue.main.async { self.uploadProgress = max(0.05, min(0.95, p)) }
+                }
             )
 
             uploadProgress = 0.7
 
-            // 发送图片消息
-            await sendImageMessage(imageUrl: imageUrl)
+            // 发送媒体消息
+            await sendMediaMessage(mediaUrl: mediaUrl, messageType: messageType)
 
             uploadProgress = 1.0
 
             UINotificationFeedbackGenerator().notificationOccurred(.success)
 
         } catch {
-            print("❌ 图片上传失败: \(error)")
-            errorMessage = "图片上传失败: \(error.localizedDescription)"
+            print("❌ 媒体文件上传失败: \(error)")
+            let msg = error.localizedDescription
+            if msg.contains("maximum allowed size") || (error as NSError).code == 413 {
+                errorMessage = "上传失败：文件过大。请压缩后再试。建议照片≤4MB、视频≤25MB。"
+            } else {
+                errorMessage = "上传失败: \(msg)"
+            }
             showError = true
 
             UINotificationFeedbackGenerator().notificationOccurred(.error)
         }
     }
 
-    // 发送图片消息
-    private func sendImageMessage(imageUrl: String) async {
+    // MARK: - 压缩辅助（仅会话内使用）
+    private func compressImageForMessage(image: UIImage, maxBytes: Int) async throws -> Data {
+        var quality: CGFloat = 0.85
+        var data = image.jpegData(compressionQuality: quality)
+        if let d = data, d.count <= maxBytes { return d }
+        while quality > 0.4 {
+            quality -= 0.1
+            data = image.jpegData(compressionQuality: quality)
+            if let d = data, d.count <= maxBytes { return d }
+        }
+        // 缩放
+        let targetMaxSide: CGFloat = 1280
+        let size = image.size
+        let maxSide = max(size.width, size.height)
+        let scale = min(1.0, targetMaxSide / maxSide)
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
+        image.draw(in: CGRect(origin: .zero, size: newSize))
+        let scaled = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        guard let scaledImage = scaled, let scaledData = scaledImage.jpegData(compressionQuality: 0.7) else {
+            throw NSError(domain: "Compression", code: -1, userInfo: [NSLocalizedDescriptionKey: "图片压缩失败"])
+        }
+        if scaledData.count <= maxBytes { return scaledData }
+        if let finalData = scaledImage.jpegData(compressionQuality: 0.5), finalData.count <= maxBytes { return finalData }
+        throw NSError(domain: "Compression", code: 413, userInfo: [NSLocalizedDescriptionKey: "图片过大，压缩后仍超过上限（≤4MB）"])
+    }
+
+    // 发送媒体消息（图片或视频）
+    private func sendMediaMessage(mediaUrl: String, messageType: MessageType) async {
         guard let myId = authService.currentUser?.id else {
             errorMessage = "请先登录"
             showError = true
@@ -448,16 +511,35 @@ struct ConversationView: View {
                 conversationId: conversation.id,
                 senderId: myId,
                 receiverId: otherUser.id,
-                content: imageUrl,  // 图片URL作为content
-                messageType: .image
+                content: mediaUrl,  // 媒体URL作为content
+                messageType: messageType
             )
 
             // 成功反馈
             await MainActor.run {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }
+
+            // 立即追加本地乐观媒体消息，提升即时感
+            let optimistic = Message(
+                id: "local-media-" + UUID().uuidString,
+                conversationId: conversation.id,
+                senderId: myId,
+                receiverId: otherUser.id,
+                sender: authService.currentUser,
+                content: mediaUrl,
+                messageType: messageType,
+                isRead: false,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+            await MainActor.run {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    messages.append(optimistic)
+                }
+            }
         } catch {
-            print("❌ 发送图片消息失败: \(error)")
+            print("❌ 发送媒体消息失败: \(error)")
             errorMessage = "发送失败: \(error.localizedDescription)"
             showError = true
 
@@ -496,11 +578,25 @@ struct ConversationView: View {
     private func subscribeRealtime() async {
         await RealtimeService.shared.subscribeToConversationMessages(conversationId: conversation.id) { msg in
             Task { @MainActor in
-                // 移除对应的待发送消息（如果存在）
-                pendingMessages.removeAll()
+                // 仅移除与回流消息匹配的待发送项（避免误清空）
+                if let myId = authService.currentUser?.id, msg.senderId == myId {
+                    if let idx = pendingMessages.firstIndex(where: { $0.content == msg.content }) {
+                        withAnimation { pendingMessages.remove(at: idx) }
+                    }
+                }
 
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                    messages.append(msg)
+                // 去重：若已有本地乐观消息，则替换，否则追加
+                if let dupIdx = messages.firstIndex(where: {
+                    $0.id == msg.id ||
+                    ($0.senderId == msg.senderId && $0.content == msg.content && $0.id.hasPrefix("local-") && abs($0.createdAt.timeIntervalSince(msg.createdAt)) < 10)
+                }) {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        messages[dupIdx] = msg
+                    }
+                } else {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        messages.append(msg)
+                    }
                 }
 
                 if let myId = authService.currentUser?.id, msg.receiverId == myId {
@@ -555,9 +651,28 @@ struct ConversationView: View {
             // 成功反馈
             await MainActor.run {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                isSending = false // 发送成功，重置状态
             }
 
-            // 发送成功后，消息会通过 Realtime 回流到列表
+            // 发送成功：移除待发送气泡并追加本地乐观消息，避免短暂消失
+            withAnimation {
+                pendingMessages.removeAll { $0.id == pendingId }
+            }
+            let optimistic = Message(
+                id: "local-" + pendingId,
+                conversationId: conversation.id,
+                senderId: myId,
+                receiverId: otherUser.id,
+                sender: authService.currentUser,
+                content: text,
+                messageType: .text,
+                isRead: false,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                messages.append(optimistic)
+            }
         } catch {
             // 发送失败，移除待发送消息
             withAnimation {
@@ -573,10 +688,9 @@ struct ConversationView: View {
 
             await MainActor.run {
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
+                isSending = false // 发送失败，也要重置状态
             }
         }
-
-        isSending = false
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy) {
@@ -647,59 +761,68 @@ private struct MessageBubble: View {
                         AsyncImage(url: URL(string: message.content)) { phase in
                             switch phase {
                             case .empty:
-                                ProgressView()
-                                    .frame(width: 200, height: 150)
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .fill(Color(.systemGray6))
+                                    ProgressView()
+                                }
+                                .frame(width: 200, height: 150)
                             case .success(let image):
                                 image
                                     .resizable()
                                     .scaledToFill()
                                     .frame(maxWidth: 200, maxHeight: 300)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                    .clipShape(RoundedRectangle(cornerRadius: 16))
                             case .failure:
-                                VStack {
-                                    Image(systemName: "photo.badge.exclamationmark")
-                                        .font(.title)
-                                    Text("加载失败")
-                                        .font(.caption)
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .fill(Color(.systemGray6))
+                                    VStack(spacing: 8) {
+                                        Image(systemName: "photo.badge.exclamationmark")
+                                            .font(.title2)
+                                        Text("加载失败")
+                                            .font(.caption)
+                                    }
+                                    .foregroundStyle(.secondary)
                                 }
-                                .foregroundStyle(.secondary)
                                 .frame(width: 200, height: 150)
                             @unknown default:
                                 EmptyView()
                             }
                         }
                         .shadow(
-                            color: isMe ? Color.blue.opacity(0.2) : Color.black.opacity(0.05),
-                            radius: 4,
+                            color: isMe ? Color.blue.opacity(0.25) : Color.black.opacity(0.1),
+                            radius: 8,
                             x: 0,
-                            y: 2
+                            y: 3
                         )
                     } else {
                         // 文本消息
                         Text(message.content)
                             .font(.body)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
                             .foregroundColor(isMe ? .white : .primary)
                             .background(
                                 Group {
                                     if isMe {
                                         LinearGradient(
-                                            colors: [.blue, .purple],
+                                            colors: [Color(red: 0.0, green: 0.48, blue: 1.0), Color(red: 0.5, green: 0.4, blue: 1.0)],
                                             startPoint: .topLeading,
                                             endPoint: .bottomTrailing
                                         )
                                     } else {
-                                        Color(.systemGray5)
+                                        RoundedRectangle(cornerRadius: 20)
+                                            .fill(Color(.systemGray6))
                                     }
                                 }
                             )
                             .clipShape(
-                                BubbleShape(isMe: isMe)
+                                RoundedRectangle(cornerRadius: 20)
                             )
                             .shadow(
-                                color: isMe ? Color.blue.opacity(0.2) : Color.black.opacity(0.05),
-                                radius: 4,
+                                color: isMe ? Color.blue.opacity(0.3) : Color.black.opacity(0.08),
+                                radius: isMe ? 8 : 5,
                                 x: 0,
                                 y: 2
                             )
@@ -742,38 +865,51 @@ private struct MessageBubble: View {
 
 private struct PendingMessageBubble: View {
     let content: String
+    @State private var opacity: Double = 0.6
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
             Spacer(minLength: 60)
 
             VStack(alignment: .trailing, spacing: 4) {
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     Text(content)
                         .font(.body)
 
                     ProgressView()
-                        .scaleEffect(0.8)
+                        .scaleEffect(0.9)
+                        .tint(.white)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
                 .foregroundColor(.white)
                 .background(
                     LinearGradient(
-                        colors: [.blue.opacity(0.6), .purple.opacity(0.6)],
+                        colors: [Color(red: 0.0, green: 0.48, blue: 1.0).opacity(0.7), Color(red: 0.5, green: 0.4, blue: 1.0).opacity(0.7)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
-                .clipShape(BubbleShape(isMe: true))
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+                .opacity(opacity)
+                .shadow(color: Color.blue.opacity(0.2), radius: 6, x: 0, y: 2)
 
-                Text("发送中...")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                    Text("发送中")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
             }
         }
         .padding(.horizontal, 4)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                opacity = 1.0
+            }
+        }
     }
 }
 

@@ -16,6 +16,8 @@ struct HomeView: View {
     @State private var posts: [Post] = []
     @State private var isLoading = false              // 首次加载指示
     @State private var isRefreshing = false           // 下拉刷新状态
+    @State private var showMHeader = false            // 顶部“M”动画显示
+    @State private var pullProgress: CGFloat = 0      // 下拉进度 0~1
     @State private var isPageLoading = false          // 串行化分页加载
     @State private var hasMore = true
     @State private var nextOffset = 0
@@ -55,7 +57,6 @@ struct HomeView: View {
                                         insertion: .scale(scale: 0.95).combined(with: .opacity),
                                         removal: .opacity
                                     ))
-                                    .animation(.spring(response: 0.4, dampingFraction: 0.8).delay(Double(index % 10) * 0.05), value: posts.count)
                                     .onAppear {
                                         if post == posts.last {
                                             Task { await loadMore() }
@@ -79,9 +80,33 @@ struct HomeView: View {
                         .padding(.bottom, 20)
                     }
                 }
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .preference(key: ScrollOffsetPreferenceKey.self, value: geo.frame(in: .named("homeScroll")).minY)
+                    }
+                )
             }
+            .coordinateSpace(name: "homeScroll")
             .refreshable {
+                await MainActor.run { isRefreshing = true; showMHeader = true }
                 await refresh()
+                await MainActor.run {
+                    isRefreshing = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showMHeader = false }
+                }
+            }
+            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
+                let offset = max(0, value)
+                let progress = min(offset / 80.0, 1.0)
+                pullProgress = progress
+                showMHeader = isRefreshing || progress > 0.01
+            }
+            .safeAreaInset(edge: .top) {
+                if showMHeader {
+                    HomeRefreshHeader(isRefreshing: isRefreshing, progress: pullProgress)
+                        .padding(.top, 6)
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -135,6 +160,8 @@ struct HomeView: View {
             if posts.isEmpty {
                 await initialLoad()
             }
+            // 实时订阅新帖子插入
+            await subscribeRealtimePosts()
             await refreshUnreadNotifications()
         }
         .alert("提示", isPresented: $showError) {
@@ -376,6 +403,107 @@ struct HomeView: View {
             unreadCenter.unreadNotifications = count
         }
     }
+
+    // MARK: - Realtime Posts Subscription
+
+    private func subscribeRealtimePosts() async {
+        await RealtimeFeedService.shared.subscribeToPosts { post in
+            Task { @MainActor in
+                guard post.status == .published else { return }
+                let author = (try? await supabaseService.fetchUser(id: post.authorId)) ?? User(id: post.authorId, nickname: "用户")
+                var enriched = post
+                enriched.author = author
+
+                switch selectedFeed {
+                case .recommended:
+                    let myId = authService.currentUser?.id
+                    if myId == nil || enriched.authorId != myId! {
+                        if !posts.contains(where: { $0.id == enriched.id }) {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                posts.insert(enriched, at: 0)
+                            }
+                        }
+                    }
+                case .following:
+                    if !posts.contains(where: { $0.id == enriched.id }) {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                            posts.insert(enriched, at: 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 顶部“M”动画（Home 专用）
+private struct HomeRefreshHeader: View {
+    let isRefreshing: Bool
+    let progress: CGFloat
+    @State private var anim: CGFloat = 0
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            GeometryReader { geo in
+                let width: CGFloat = 28
+                let height: CGFloat = 16
+                let startX: CGFloat = geo.size.width / 2 - width / 2
+                let startY: CGFloat = 6
+
+                // 构建“M”路径为局部常量，确保返回单一 View 类型
+                let path: Path = {
+                    var p = Path()
+                    p.move(to: CGPoint(x: startX, y: startY + height))
+                    p.addLine(to: CGPoint(x: startX, y: startY))
+                    p.addLine(to: CGPoint(x: startX + width/2, y: startY + height/2))
+                    p.addLine(to: CGPoint(x: startX + width, y: startY))
+                    p.addLine(to: CGPoint(x: startX + width, y: startY + height))
+                    return p
+                }()
+
+                let hue1 = (sin(t * 1.2) * 0.5 + 0.5)
+                let hue2 = (sin(t * 1.2 + 1.0) * 0.5 + 0.5)
+                let startShift = 0.2 + 0.3 * (sin(t * 1.0) * 0.5 + 0.5)
+                let endShift = 0.8 - startShift
+                let gradient = LinearGradient(
+                    colors: [Color(hue: hue1, saturation: 0.9, brightness: 1.0),
+                             Color(hue: hue2, saturation: 0.9, brightness: 1.0)],
+                    startPoint: UnitPoint(x: startShift, y: 0),
+                    endPoint: UnitPoint(x: endShift, y: 1)
+                )
+
+                let dashPhase = isRefreshing ? CGFloat(t * 60).truncatingRemainder(dividingBy: 1000) : 0
+                path
+                    .trim(from: 0, to: isRefreshing ? 1 : anim)
+                    .stroke(
+                        gradient,
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: isRefreshing ? [8, 6] : [], dashPhase: dashPhase)
+                    )
+                    .frame(height: height + 8)
+                    .onChange(of: isRefreshing) { _, refreshing in
+                        if refreshing {
+                            withAnimation(.easeInOut(duration: 0.25)) { anim = 1 }
+                        } else {
+                            withAnimation(.easeInOut(duration: 0.25)) { anim = 0 }
+                        }
+                    }
+                    .onChange(of: progress) { _, p in
+                        if !isRefreshing {
+                            withAnimation(.easeOut(duration: 0.12)) { anim = max(0, min(1, p)) }
+                        }
+                    }
+            }
+        }
+        .frame(height: 32)
+    }
+}
+
+// 滚动偏移（用于M动画进度）
+private struct ScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 // 其余 GentlePostCard / TagView / RecommendationCardView / PostImagesView 与之前一致，已保留。
+

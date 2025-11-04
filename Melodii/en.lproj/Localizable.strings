@@ -1,0 +1,78 @@
+/* Core navigation and common */
+"发现" = "Discover";
+"消息" = "Messages";
+"推荐" = "Recommended";
+"关注" = "Following";
+"我的" = "Me";
+"设置" = "Settings";
+"语言" = "Language";
+"完成" = "Done";
+"错误" = "Error";
+"提示" = "Notice";
+"确定" = "OK";
+"取消" = "Cancel";
+"加载中..." = "Loading...";
+"没有更多了" = "No more";
+"已经到底啦 ✨" = "You've reached the end ✨";
+
+/* Theme Settings */
+"主题模式" = "Theme";
+"浅色" = "Light";
+"深色" = "Dark";
+"跟随系统" = "System";
+"关于" = "About";
+
+/* Profile */
+"编辑资料" = "Edit Profile";
+"我的帖子" = "My Posts";
+"我的收藏" = "My Collections";
+"草稿箱" = "Drafts";
+"版本" = "Version";
+"用户协议" = "Terms of Service";
+"隐私政策" = "Privacy Policy";
+"退出登录" = "Sign Out";
+"外观" = "Appearance";
+"主题模式" = "Theme";
+"隐私" = "Privacy";
+"隐私功能即将推出" = "Privacy features coming soon";
+"关注/粉丝列表隐私设置功能正在开发中" = "Privacy controls for follow lists are under development";
+"通知" = "Notifications";
+"通知设置" = "Notification Settings";
+"推送通知" = "Push Notifications";
+"设备已注册: " = "Device registered: ";
+"私信通知" = "Direct Messages";
+"点赞通知" = "Likes";
+"评论通知" = "Comments";
+"关注通知" = "Follows";
+"通知类型" = "Notification Types";
+"你可以单独控制每种类型的通知" = "You can control each notification type separately";
+"需要通知权限" = "Notification Permission Required";
+"去设置" = "Open Settings";
+"请在系统设置中允许Melodii发送通知" = "Allow Melodii notifications in System Settings";
+"搜索 MID 或昵称" = "Search MID or nickname";
+"搜索中..." = "Searching...";
+"Home" = "Home";
+"Connect" = "Connect";
+"Me" = "Me";
+"未登录" = "Not signed in";
+"登录后可查看通知" = "Sign in to view notifications";
+"暂无通知" = "No notifications";
+"当有人点赞或评论您的内容时，通知会显示在这里" = "Notifications appear here when someone likes or comments on your content";
+"全部标记为已读" = "Mark all as read";
+"让每个普通瞬间，都值得被看见" = "Every ordinary moment deserves to be seen";
+"还没有动态" = "No posts yet";
+"快来分享你的生活瞬间吧" = "Share your moments";
+"关闭" = "Close";
+
+/* Post detail / actions */
+"删除" = "Delete";
+"隐藏" = "Hide";
+"草稿" = "Draft";
+"动态详情" = "Post Detail";
+"私信" = "Message";
+"关注" = "Follow";
+"已关注" = "Following";
+"粉丝" = "Followers";
+"获赞" = "Likes";
+"帖子" = "Posts";
+"MID" = "MID";

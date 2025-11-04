@@ -13,11 +13,20 @@ import UserNotifications
 struct MelodiiApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var languageManager = LanguageManager.shared
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .preferredColorScheme(themeManager.currentTheme.colorScheme)
+                .environment(\.locale, languageManager.currentLocale)
+                .onReceive(NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)) { _ in
+                    // 当选择“跟随系统”时，系统语言变化后强制刷新一次 Locale（切到英文再切回系统）。
+                    if languageManager.currentLanguage == .system {
+                        languageManager.setLanguage(.english)
+                        languageManager.setLanguage(.system)
+                    }
+                }
         }
         .modelContainer(for: [User.self, Post.self, Comment.self])
     }

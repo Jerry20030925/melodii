@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AVKit
+import AVFoundation
 import Combine
 
 struct PostDetailView: View {
@@ -42,6 +43,10 @@ struct PostDetailView: View {
 
     // 评论滚动
     @State private var pendingScrollTarget: String?
+    // 评论交互
+    @State private var expandedThreads: Set<String> = []
+    @State private var commentToDelete: Comment? = nil
+    @State private var showDeleteConfirm: Bool = false
 
     init(post: Post, commentId: String? = nil) {
         self.post = post
@@ -61,37 +66,47 @@ struct PostDetailView: View {
                             Circle()
                                 .fill(
                                     LinearGradient(
-                                        colors: [.blue.opacity(0.6), .purple.opacity(0.6)],
+                                        colors: post.isAnonymous ? [.gray.opacity(0.6), .gray.opacity(0.8)] : [.blue.opacity(0.6), .purple.opacity(0.6)],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     )
                                 )
                                 .frame(width: 50, height: 50)
                                 .overlay(
-                                    Text(post.author.initials)
+                                    Text(post.isAnonymous ? "匿" : post.author.initials)
                                         .font(.title3)
                                         .foregroundStyle(Color.white)
                                 )
                         }
                         .buttonStyle(.plain)
+                        .disabled(post.isAnonymous)
 
                         NavigationLink(destination: UserProfileView(user: post.author)) {
                             VStack(alignment: .leading, spacing: 4) {
-                                let displayName = (post.author.nickname == "Loading...") ? "用户" : post.author.nickname
+                                // 匿名帖子显示"匿名"，非匿名帖子显示真实昵称
+                                let displayName = post.isAnonymous ? "匿名" : post.author.nickname
                                 Text(displayName)
                                     .font(.headline)
                                     .foregroundStyle(.primary)
 
-                                // 显示 MID + 数据库 ID + 时间
+                                // 显示 MID 和时间
                                 HStack(spacing: 6) {
-                                    if let mid = post.author.mid {
-                                        Text("MID: \(mid)")
+                                    // 匿名帖子不显示MID
+                                    if !post.isAnonymous {
+                                        if let mid = post.author.mid, !mid.isEmpty {
+                                            Text("@\(mid)")
+                                                .font(.caption)
+                                                .foregroundStyle(.blue)
+                                        } else {
+                                            Text("@\(post.author.id.prefix(8))")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    } else {
+                                        Text("@匿名用户")
                                             .font(.caption)
-                                            .foregroundStyle(.blue)
+                                            .foregroundStyle(.secondary)
                                     }
-                                    Text("ID: \(post.author.id)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
 
                                     Text("•")
                                         .font(.caption)
@@ -100,6 +115,16 @@ struct PostDetailView: View {
                                     Text(post.createdAt.timeAgoDisplay)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                        
+                                    if let city = post.city, !city.isEmpty {
+                                        Text("•")
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                        
+                                        Text(city)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -263,14 +288,86 @@ struct PostDetailView: View {
                                 .frame(maxWidth: .infinity, alignment: .center)
                                 .padding()
                         } else {
-                            ForEach(comments) { comment in
-                                CommentRow(comment: comment) { replyTo in
-                                    replyToComment = replyTo
-                                    commentText = ""
-                                    isCommentFieldFocused = true
+                            // 分组显示为线程：顶层评论 + 子回复
+                            ForEach(buildCommentThreads(from: comments)) { thread in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    // 顶层评论
+                                    CommentItemView(
+                                        comment: thread.root,
+                                        parentAuthorName: nil,
+                                        canDelete: authService.currentUser?.id == thread.root.authorId,
+                                        onCopy: { copyComment($0) },
+                                        onDelete: { target in
+                                            commentToDelete = target
+                                            showDeleteConfirm = true
+                                        },
+                                        onReport: { reportComment($0) }
+                                    ) { replyTo in
+                                        replyToComment = replyTo
+                                        commentText = ""
+                                        isCommentFieldFocused = true
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .id(thread.root.id)
+
+                                    // 子回复（缩进 + 竖线引导）
+                                    if !thread.replies.isEmpty {
+                                        let isExpanded = expandedThreads.contains(thread.id)
+                                        let previewCount = 2
+                                        let displayed = isExpanded ? thread.replies : Array(thread.replies.prefix(previewCount))
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            ForEach(displayed) { reply in
+                                                HStack(alignment: .top, spacing: 8) {
+                                                    // 竖线引导层次
+                                                    Rectangle()
+                                                        .fill(Color(.systemGray5))
+                                                        .frame(width: 2)
+                                                        .cornerRadius(1)
+
+                                                    CommentItemView(
+                                                        comment: reply,
+                                                        parentAuthorName: thread.root.author.nickname,
+                                                        canDelete: authService.currentUser?.id == reply.authorId,
+                                                        onCopy: { copyComment($0) },
+                                                        onDelete: { target in
+                                                            commentToDelete = target
+                                                            showDeleteConfirm = true
+                                                        },
+                                                        onReport: { reportComment($0) }
+                                                    ) { selected in
+                                                        replyToComment = selected
+                                                        commentText = ""
+                                                        isCommentFieldFocused = true
+                                                    }
+                                                    .id(reply.id)
+                                                }
+                                                .padding(.leading, 16)
+                                                .padding(.trailing, 8)
+                                            }
+                                            // 展开/收起控制
+                                            if thread.replies.count > displayed.count {
+                                                Button {
+                                                    expandedThreads.insert(thread.id)
+                                                } label: {
+                                                    Text("展开 \(thread.replies.count - displayed.count) 条回复")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.blue)
+                                                }
+                                                .padding(.leading, 24)
+                                            } else if isExpanded && thread.replies.count > previewCount {
+                                                Button {
+                                                    expandedThreads.remove(thread.id)
+                                                } label: {
+                                                    Text("收起回复")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                                .padding(.leading, 24)
+                                            }
+                                        }
+                                    }
                                 }
-                                .padding(.horizontal, 16)
-                                .id(comment.id)
+                                .padding(.vertical, 6)
                             }
                         }
                     }
@@ -292,9 +389,8 @@ struct PostDetailView: View {
             if authService.isAuthenticated {
                 VStack(spacing: 0) {
                     if let replyTo = replyToComment {
-                        let replyName = (replyTo.author.nickname == "Loading...") ? "用户" : replyTo.author.nickname
                         HStack {
-                            Text("回复 @\(replyName)")
+                            Text("回复 @\(replyTo.author.nickname)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -350,6 +446,16 @@ struct PostDetailView: View {
         }
         .navigationDestination(for: User.self) { user in
             UserProfileView(user: user)
+        }
+        .alert("删除评论", isPresented: $showDeleteConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                if let target = commentToDelete {
+                    Task { await deleteComment(target) }
+                }
+            }
+        } message: {
+            Text("确定删除这条评论吗？此操作不可恢复")
         }
     }
 
@@ -527,6 +633,57 @@ struct PostDetailView: View {
 
         isSubmittingComment = false
     }
+
+    private func copyComment(_ comment: Comment) {
+        UIPasteboard.general.string = comment.text
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func deleteComment(_ comment: Comment) async {
+        guard let uid = authService.currentUser?.id, uid == comment.authorId else {
+            alertMessage = "只能删除自己的评论"
+            showAlert = true
+            return
+        }
+        do {
+            try await supabaseService.deleteComment(id: comment.id, postId: post.id)
+            await MainActor.run {
+                comments.removeAll { $0.id == comment.id }
+                commentCount = max(0, commentCount - 1)
+            }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } catch {
+            alertMessage = "删除失败：\(error.localizedDescription)"
+            showAlert = true
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+    }
+
+    private func reportComment(_ comment: Comment) {
+        guard let uid = authService.currentUser?.id else { return }
+        Task {
+            do {
+                try await supabaseService.reportComment(
+                    reporterId: uid,
+                    reportedUserId: comment.authorId,
+                    postId: post.id,
+                    commentId: comment.id,
+                    reason: nil
+                )
+                await MainActor.run {
+                    alertMessage = "已举报该评论，我们会尽快处理"
+                    showAlert = true
+                }
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } catch {
+                await MainActor.run {
+                    alertMessage = "举报失败：\(error.localizedDescription)"
+                    showAlert = true
+                }
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+        }
+    }
 }
 
 // 单页媒体（用于 TabView 内）
@@ -537,8 +694,7 @@ private struct MediaPage: View {
     @State private var hasError = false
 
     private func isVideo(_ url: String) -> Bool {
-        let lower = url.lowercased()
-        return lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || lower.hasSuffix(".m4v") || lower.hasSuffix(".avi") || lower.hasSuffix(".mkv")
+        return url.isVideoURL // 使用扩展中的统一检测方法
     }
 
     var body: some View {
@@ -650,7 +806,17 @@ private struct MediaPage: View {
                     case .readyToPlay:
                         isLoading = false
                         hasError = false
+                        // 配置音频播放会话，确保视频声音正常
+                        do {
+                            let session = AVAudioSession.sharedInstance()
+                            try session.setCategory(.playback, mode: .moviePlayback, options: [])
+                            try session.setActive(true)
+                        } catch {
+                            print("⚠️ 配置音频会话失败: \(error)")
+                        }
                         player = newPlayer
+                        player?.isMuted = false
+                        player?.volume = 1.0
                     case .failed:
                         isLoading = false
                         hasError = true
@@ -674,20 +840,125 @@ private struct MediaPage: View {
     @State private var cancellables = Set<AnyCancellable>()
 }
 
-// 评论行保留你现有实现；这里占位
-private struct CommentRow: View {
+// MARK: - 评论线程与视图
+
+/// 单个线程：顶层评论 + 其直接子回复
+private struct CommentThread: Identifiable {
+    let id: String
+    let root: Comment
+    let replies: [Comment]
+}
+
+/// 评论条目视图：头像 + 名称 + 时间 +（可选）回复@谁 + 文本 + 操作
+private struct CommentItemView: View {
     let comment: Comment
+    let parentAuthorName: String?
+    let canDelete: Bool
+    let onCopy: (Comment) -> Void
+    let onDelete: (Comment) -> Void
+    let onReport: (Comment) -> Void
     let onReply: (Comment) -> Void
 
     var body: some View {
-        // 请替换为你项目中的实际 CommentRow 内容
-        VStack(alignment: .leading, spacing: 4) {
-            Text(comment.author.nickname == "Loading..." ? "用户" : comment.author.nickname)
-                .font(.subheadline).bold()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 10) {
+                // 头像：优先使用真实头像
+                if let urlString = comment.author.avatarURL, let url = URL(string: urlString) {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .empty:
+                            Circle().fill(Color(.systemGray5))
+                                .frame(width: 28, height: 28)
+                                .overlay(ProgressView().scaleEffect(0.6))
+                        case .success(let image):
+                            image.resizable().scaledToFill()
+                                .frame(width: 28, height: 28)
+                                .clipShape(Circle())
+                        case .failure:
+                            Circle()
+                                .fill(LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 28, height: 28)
+                                .overlay(
+                                    Text(comment.author.initials)
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(.white)
+                                )
+                        @unknown default:
+                            Circle().fill(Color(.systemGray5)).frame(width: 28, height: 28)
+                        }
+                    }
+                } else {
+                    Circle()
+                        .fill(LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 28, height: 28)
+                        .overlay(
+                            Text(comment.author.initials)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.white)
+                        )
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(comment.author.nickname == "Loading..." ? "用户" : comment.author.nickname)
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+
+                        if let mid = comment.author.mid, !mid.isEmpty {
+                            Text("@\(mid)")
+                                .font(.caption2)
+                                .foregroundStyle(.blue)
+                        }
+
+                        Text(comment.createdAt.timeAgoDisplay)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let parent = parentAuthorName, !parent.isEmpty {
+                        Text("回复 @\(parent)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+                // 快速回复按钮
+                Button { onReply(comment) } label: {
+                    Text("回复")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+            }
+
             Text(comment.text)
                 .font(.body)
+                .foregroundStyle(.primary)
+                .contextMenu {
+                    Button("复制") { onCopy(comment) }
+                    if canDelete { Button("删除", role: .destructive) { onDelete(comment) } }
+                    Button("举报") { onReport(comment) }
+                }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// 将评论分组成线程：顶层评论 + 直接子回复（按时间正序）
+private extension PostDetailView {
+    func buildCommentThreads(from list: [Comment]) -> [CommentThread] {
+        // 顶层评论：replyToId为空
+        let roots = list.filter { $0.replyToId == nil }
+            .sorted { $0.createdAt < $1.createdAt }
+
+        // 子回复按父ID分组
+        let repliesMap = Dictionary(grouping: list.filter { $0.replyToId != nil }, by: { $0.replyToId! })
+
+        return roots.map { root in
+            let replies = repliesMap[root.id]?.sorted { $0.createdAt < $1.createdAt } ?? []
+            return CommentThread(id: root.id, root: root, replies: replies)
+        }
     }
 }
 

@@ -11,15 +11,46 @@ extension String {
     /// 检测字符串是否为视频URL
     var isVideoURL: Bool {
         let lower = self.lowercased()
+
+        // 移除查询参数和fragment
+        let urlWithoutParams: String
+        if let questionMarkIndex = lower.firstIndex(of: "?") {
+            urlWithoutParams = String(lower[..<questionMarkIndex])
+        } else if let hashIndex = lower.firstIndex(of: "#") {
+            urlWithoutParams = String(lower[..<hashIndex])
+        } else {
+            urlWithoutParams = lower
+        }
+
+        // 检查文件扩展名
         let videoExtensions = [".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".flv", ".wmv", ".mpg", ".mpeg"]
-        return videoExtensions.contains { lower.hasSuffix($0) }
+
+        // 检查是否包含 "videos/" 路径（Supabase存储的视频路径）
+        let hasVideosPath = urlWithoutParams.contains("/videos/")
+
+        // 如果路径包含 "videos/" 或者扩展名匹配，则认为是视频
+        return hasVideosPath || videoExtensions.contains { urlWithoutParams.hasSuffix($0) }
     }
     
     /// 检测字符串是否为图片URL
     var isImageURL: Bool {
+        // 如果已经是视频，则不是图片
+        if isVideoURL { return false }
+
         let lower = self.lowercased()
+
+        // 移除查询参数和fragment
+        let urlWithoutParams: String
+        if let questionMarkIndex = lower.firstIndex(of: "?") {
+            urlWithoutParams = String(lower[..<questionMarkIndex])
+        } else if let hashIndex = lower.firstIndex(of: "#") {
+            urlWithoutParams = String(lower[..<hashIndex])
+        } else {
+            urlWithoutParams = lower
+        }
+
         let imageExtensions = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".heic", ".heif"]
-        return imageExtensions.contains { lower.hasSuffix($0) }
+        return imageExtensions.contains { urlWithoutParams.hasSuffix($0) }
     }
     
     /// 检测字符串是否为音频URL

@@ -9,67 +9,185 @@ import SwiftUI
 
 struct ConnectView: View {
     @ObservedObject private var authService = AuthService.shared
+    @ObservedObject private var supabaseService = SupabaseService.shared
+
+    @State private var selectedFeatureIndex: Int?
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 20) {
+                VStack(spacing: 32) {
                     // 顶部特色功能卡片
                     featureSectionHeader
+                        .padding(.horizontal)
 
-                    // 功能网格
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.flexible()),
-                            GridItem(.flexible())
-                        ],
-                        spacing: 16
-                    ) {
-                        // 摇一摇发现
-                        FeatureCard(
-                            icon: "sparkles",
-                            title: "摇一摇",
-                            subtitle: "发现有趣的人",
-                            gradient: [.blue, .purple],
-                            destination: AnyView(ShakeDiscoveryView())
-                        )
+                    // 圆形功能卡片 - 水平滚动
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 20) {
+                            // 摇一摇发现
+                            CircularFeatureCard(
+                                icon: "sparkles",
+                                title: "摇一摇",
+                                subtitle: "发现有趣的人",
+                                gradient: [.blue, .purple],
+                                destination: AnyView(ShakeDiscoveryView()),
+                                isSelected: selectedFeatureIndex == 0
+                            )
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                    selectedFeatureIndex = 0
+                                }
+                            }
 
-                        // 情绪日记
-                        FeatureCard(
-                            icon: "heart.text.square",
-                            title: "情绪日记",
-                            subtitle: "记录心情变化",
-                            gradient: [.pink, .orange],
-                            destination: AnyView(MoodTrackerView())
-                        )
+                            // 情绪日记
+                            CircularFeatureCard(
+                                icon: "heart.text.square",
+                                title: "情绪日记",
+                                subtitle: "记录心情变化",
+                                gradient: [.pink, .orange],
+                                destination: AnyView(MoodTrackerView()),
+                                isSelected: selectedFeatureIndex == 1
+                            )
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                    selectedFeatureIndex = 1
+                                }
+                            }
 
-                        // 每日挑战
-                        FeatureCard(
-                            icon: "trophy",
-                            title: "每日挑战",
-                            subtitle: "赢取积分奖励",
-                            gradient: [.orange, .red],
-                            destination: AnyView(DailyChallengeView())
-                        )
+                            // 每日挑战
+                            CircularFeatureCard(
+                                icon: "trophy",
+                                title: "每日挑战",
+                                subtitle: "赢取积分奖励",
+                                gradient: [.orange, .red],
+                                destination: AnyView(DailyChallengeView()),
+                                isSelected: selectedFeatureIndex == 2
+                            )
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                    selectedFeatureIndex = 2
+                                }
+                            }
 
-                        // 私信列表
-                        FeatureCard(
-                            icon: "bubble.left.and.bubble.right",
-                            title: "私信",
-                            subtitle: "查看所有对话",
-                            gradient: [.green, .mint],
-                            destination: AnyView(MessagesListView())
-                        )
+                            // 私信列表
+                            CircularFeatureCard(
+                                icon: "bubble.left.and.bubble.right",
+                                title: "私信",
+                                subtitle: "查看所有对话",
+                                gradient: [.green, .mint],
+                                destination: AnyView(MessagesListView()),
+                                isSelected: selectedFeatureIndex == 3
+                            )
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                    selectedFeatureIndex = 3
+                                }
+                            }
+                        }
+                        .padding(.horizontal)
                     }
+                    .padding(.vertical, 8)
 
-                    // 热门话题
-                    trendingTopicsSection
+                    // 聊天列表
+                    conversationsSection
+                        .padding(.horizontal)
                 }
-                .padding()
+                .padding(.vertical)
             }
             .navigationTitle("探索")
             .navigationBarTitleDisplayMode(.large)
         }
+    }
+
+    // MARK: - Conversations Section
+
+    @State private var conversations: [Conversation] = []
+    @State private var isLoadingConversations = false
+
+    private var conversationsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("💬 最近聊天")
+                    .font(.title3)
+                    .fontWeight(.bold)
+
+                Spacer()
+
+                NavigationLink {
+                    MessagesListView()
+                } label: {
+                    Text("查看全部")
+                        .font(.subheadline)
+                        .foregroundStyle(.blue)
+                }
+            }
+
+            if isLoadingConversations {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
+                .padding()
+            } else if conversations.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.secondary)
+
+                    Text("还没有对话")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    NavigationLink {
+                        SearchView()
+                    } label: {
+                        Text("去发现新朋友")
+                            .font(.subheadline)
+                            .foregroundStyle(.blue)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color(.systemGray6).opacity(0.5))
+                )
+            } else {
+                VStack(spacing: 12) {
+                    ForEach(conversations.prefix(5)) { conversation in
+                        if let otherUser = conversation.getOtherUser(currentUserId: authService.currentUser?.id ?? "") {
+                            NavigationLink {
+                                ConversationView(conversation: conversation, otherUser: otherUser)
+                            } label: {
+                                CompactConversationRow(conversation: conversation, otherUser: otherUser)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .task {
+            await loadConversations()
+        }
+    }
+
+    private func loadConversations() async {
+        guard let userId = authService.currentUser?.id else { return }
+
+        isLoadingConversations = true
+
+        do {
+            let allConversations = try await supabaseService.fetchConversations(userId: userId)
+            await MainActor.run {
+                conversations = allConversations
+            }
+        } catch {
+            print("❌ 加载会话失败: \(error)")
+        }
+
+        isLoadingConversations = false
     }
 
     // MARK: - Feature Section Header
@@ -87,63 +205,41 @@ struct ConnectView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Trending Topics
-
-    private var trendingTopicsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("🔥 热门话题")
-                .font(.headline)
-                .fontWeight(.semibold)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(["音乐", "旅行", "美食", "摄影", "读书", "运动"], id: \.self) { topic in
-                        Button {
-                            // TODO: 跳转到话题页
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text("#\(topic)")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-
-                                Text("•")
-                                    .font(.caption)
-
-                                Text("\(Int.random(in: 100...9999))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(
-                                Capsule()
-                                    .fill(Color(.systemGray6))
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
-// MARK: - Feature Card
+// MARK: - Circular Feature Card
 
-private struct FeatureCard: View {
+private struct CircularFeatureCard: View {
     let icon: String
     let title: String
     let subtitle: String
     let gradient: [Color]
     let destination: AnyView
+    let isSelected: Bool
+
+    @State private var isPressed = false
 
     var body: some View {
         NavigationLink {
             destination
         } label: {
-            VStack(spacing: 12) {
-                // 图标
+            VStack(spacing: 16) {
+                // 大圆形图标
                 ZStack {
+                    // 外圈光晕效果
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: gradient.map { $0.opacity(0.3) },
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 110, height: 110)
+                        .blur(radius: 10)
+                        .opacity(isSelected ? 1 : 0.5)
+
+                    // 主圆形
                     Circle()
                         .fill(
                             LinearGradient(
@@ -152,41 +248,55 @@ private struct FeatureCard: View {
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .frame(width: 60, height: 60)
+                        .frame(width: 90, height: 90)
                         .shadow(
-                            color: gradient.first?.opacity(0.4) ?? .clear,
-                            radius: 10,
+                            color: gradient.first?.opacity(0.5) ?? .clear,
+                            radius: isPressed ? 5 : 15,
                             x: 0,
-                            y: 5
+                            y: isPressed ? 2 : 8
                         )
 
+                    // 图标
                     Image(systemName: icon)
-                        .font(.system(size: 28, weight: .semibold))
+                        .font(.system(size: 36, weight: .semibold))
                         .foregroundStyle(.white)
+                        .symbolEffect(.bounce, value: isSelected)
                 }
+                .scaleEffect(isPressed ? 0.95 : (isSelected ? 1.05 : 1.0))
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isPressed)
+                .animation(.spring(response: 0.4, dampingFraction: 0.7), value: isSelected)
 
-                // 文字
+                // 文字信息
                 VStack(spacing: 4) {
                     Text(title)
                         .font(.headline)
-                        .fontWeight(.semibold)
+                        .fontWeight(.bold)
                         .foregroundStyle(.primary)
 
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                        .lineLimit(2)
                 }
+                .frame(width: 100)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 24)
-            .background(
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(Color(.systemBackground))
-                    .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 5)
-            )
+            .padding(.vertical, 12)
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    withAnimation(.easeInOut(duration: 0.1)) {
+                        isPressed = true
+                    }
+                }
+                .onEnded { _ in
+                    withAnimation(.easeInOut(duration: 0.1)) {
+                        isPressed = false
+                    }
+                }
+        )
     }
 }
 
@@ -305,6 +415,86 @@ private struct MessagesListView: View {
         }
 
         isLoading = false
+    }
+}
+
+// MARK: - Compact Conversation Row
+
+private struct CompactConversationRow: View {
+    let conversation: Conversation
+    let otherUser: User
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // 头像
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [.purple.opacity(0.6), .pink.opacity(0.6)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 50, height: 50)
+                .overlay(
+                    Text(otherUser.initials)
+                        .font(.headline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.white)
+                )
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(otherUser.nickname)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+
+                    Text(formatTime(conversation.lastMessageAt))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                // 最后一条消息预览
+                if let lastMsg = conversation.lastMessage {
+                    Text(lastMsg.content)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("开始聊天...")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .italic()
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemBackground))
+                .shadow(color: .black.opacity(0.05), radius: 5, x: 0, y: 2)
+        )
+    }
+
+    private func formatTime(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let now = Date()
+
+        if calendar.isDateInToday(date) {
+            let formatter = DateFormatter()
+            formatter.timeStyle = .short
+            return formatter.string(from: date)
+        } else if calendar.isDateInYesterday(date) {
+            return "昨天"
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .short
+            return formatter.string(from: date)
+        }
     }
 }
 
