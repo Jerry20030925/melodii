@@ -432,23 +432,9 @@ struct EditProfileView: View {
                 nickname: nickname,
                 bio: bio.isEmpty ? nil : bio,
                 avatarURL: avatarURL ?? user.avatarURL,
-                coverURL: coverURL ?? user.coverImageURL
+                coverURL: coverURL ?? user.coverImageURL,
+                interests: interests  // 现在支持interests参数
             )
-
-            struct ExtraUserUpdates: Encodable {
-                let interests: [String]
-                let updated_at: String
-            }
-            let extras = ExtraUserUpdates(
-                interests: interests,
-                updated_at: ISO8601DateFormatter().string(from: Date())
-            )
-
-            try await SupabaseConfig.client
-                .from("users")
-                .update(extras)
-                .eq("id", value: user.id)
-                .execute()
 
             if let currentUser = authService.currentUser {
                 currentUser.nickname = nickname

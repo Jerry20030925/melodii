@@ -26,6 +26,8 @@ final class User: Codable, Hashable {
     var followingCount: Int?
     var followersCount: Int?
     var likesCount: Int?
+    var isOnline: Bool
+    var lastSeenAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -47,6 +49,8 @@ final class User: Codable, Hashable {
          followingCount: Int? = nil,
          followersCount: Int? = nil,
          likesCount: Int? = nil,
+         isOnline: Bool = false,
+         lastSeenAt: Date? = nil,
          createdAt: Date = Date(),
          updatedAt: Date = Date()) {
         self.id = id
@@ -63,6 +67,8 @@ final class User: Codable, Hashable {
         self.followingCount = followingCount
         self.followersCount = followersCount
         self.likesCount = likesCount
+        self.isOnline = isOnline
+        self.lastSeenAt = lastSeenAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -93,6 +99,8 @@ final class User: Codable, Hashable {
         case followingCount = "following_count"
         case followersCount = "followers_count"
         case likesCount = "likes_count"
+        case isOnline = "is_online"
+        case lastSeenAt = "last_seen_at"
         case createdAt = "created_at", updatedAt = "updated_at"
     }
 
@@ -112,6 +120,8 @@ final class User: Codable, Hashable {
         followingCount = try container.decodeIfPresent(Int.self, forKey: .followingCount)
         followersCount = try container.decodeIfPresent(Int.self, forKey: .followersCount)
         likesCount = try container.decodeIfPresent(Int.self, forKey: .likesCount)
+        isOnline = try container.decodeIfPresent(Bool.self, forKey: .isOnline) ?? false
+        lastSeenAt = try container.decodeIfPresent(Date.self, forKey: .lastSeenAt)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
@@ -132,6 +142,8 @@ final class User: Codable, Hashable {
         try container.encodeIfPresent(followingCount, forKey: .followingCount)
         try container.encodeIfPresent(followersCount, forKey: .followersCount)
         try container.encodeIfPresent(likesCount, forKey: .likesCount)
+        try container.encode(isOnline, forKey: .isOnline)
+        try container.encodeIfPresent(lastSeenAt, forKey: .lastSeenAt)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
     }

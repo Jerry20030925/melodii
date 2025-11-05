@@ -2,6 +2,21 @@ import Foundation
 import CoreLocation
 import Combine
 
+// MARK: - CLAuthorizationStatus Extension
+
+extension CLAuthorizationStatus {
+    var description: String {
+        switch self {
+        case .notDetermined: return "未确定"
+        case .restricted: return "受限"
+        case .denied: return "拒绝"
+        case .authorizedAlways: return "始终允许"
+        case .authorizedWhenInUse: return "使用期间"
+        @unknown default: return "未知状态"
+        }
+    }
+}
+
 @MainActor
 final class LocationService: NSObject, ObservableObject {
     static let shared = LocationService()
@@ -46,6 +61,8 @@ final class LocationService: NSObject, ObservableObject {
 
         // 检查权限状态
         let status = manager.authorizationStatus
+
+        // 只在明确拒绝或受限时显示权限错误
         if status == .denied || status == .restricted {
             locationError = "位置权限未授权，请在设置中开启"
             isLocating = false
@@ -54,11 +71,15 @@ final class LocationService: NSObject, ObservableObject {
 
         // 使用千米级精度，更快响应
         if status == .authorizedAlways || status == .authorizedWhenInUse {
+            print("✅ 已授权位置权限，开始定位...")
             manager.desiredAccuracy = kCLLocationAccuracyKilometer
             manager.requestLocation()
-        } else {
-            // 请求权限
+        } else if status == .notDetermined {
+            // 首次请求权限
+            print("⚠️ 首次请求位置权限...")
             manager.requestWhenInUseAuthorization()
+            // 不设置超时，等待用户授权后的回调
+            return
         }
 
         // 设置8秒超时（缩短超时时间）
@@ -67,7 +88,13 @@ final class LocationService: NSObject, ObservableObject {
             try? await Task.sleep(nanoseconds: 8_000_000_000) // 8秒
             if isLocating {
                 isLocating = false
-                locationError = "定位超时，请检查网络或位置权限"
+                // 超时时检查是否是权限问题
+                let currentStatus = manager.authorizationStatus
+                if currentStatus == .denied || currentStatus == .restricted {
+                    locationError = "位置权限未授权，请在设置中开启"
+                } else {
+                    locationError = "定位超时，请检查网络连接"
+                }
             }
         }
     }
@@ -96,16 +123,29 @@ final class LocationService: NSObject, ObservableObject {
 extension LocationService: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
-            self.authorizationStatus = manager.authorizationStatus
-            if manager.authorizationStatus == .authorizedWhenInUse || manager.authorizationStatus == .authorizedAlways {
+            let status = manager.authorizationStatus
+            self.authorizationStatus = status
+
+            print("📍 位置权限状态变更: \(status.description)")
+
+            if status == .authorizedWhenInUse || status == .authorizedAlways {
+                // 权限已授予
+                print("✅ 位置权限已授予")
                 // 如果正在定位中，立即请求位置
                 if self.isLocating {
+                    print("🔍 开始请求位置...")
+                    self.locationError = nil  // 清除错误
                     self.boostAccuracy()
                     manager.requestLocation()
                 }
-            } else if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+            } else if status == .denied || status == .restricted {
+                // 权限被拒绝
+                print("❌ 位置权限被拒绝")
                 self.isLocating = false
                 self.locationError = "位置权限未授权，请在设置中开启"
+            } else if status == .notDetermined {
+                // 尚未请求权限
+                print("⚠️ 位置权限未确定")
             }
         }
     }

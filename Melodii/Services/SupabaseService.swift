@@ -210,7 +210,8 @@ class SupabaseService: ObservableObject {
         nickname: String?,
         bio: String?,
         avatarURL: String?,
-        coverURL: String?
+        coverURL: String?,
+        interests: [String]? = nil
     ) async throws {
         let payload = UsersPatch(
             nickname: nickname,
@@ -225,6 +226,24 @@ class SupabaseService: ObservableObject {
             .update(payload)
             .eq("id", value: id)
             .execute()
+
+        // 如果提供了interests，单独更新（因为UsersPatch可能不包含此字段）
+        if let interests = interests {
+            struct InterestsUpdate: Encodable {
+                let interests: [String]
+                let updated_at: String
+            }
+            let interestsPayload = InterestsUpdate(
+                interests: interests,
+                updated_at: ISO8601DateFormatter().string(from: Date())
+            )
+
+            _ = try await client
+                .from("users")
+                .update(interestsPayload)
+                .eq("id", value: id)
+                .execute()
+        }
     }
 
     /// 更新用户MID
@@ -1271,5 +1290,6 @@ class SupabaseService: ObservableObject {
             return signedURL.absoluteString
         }
     }
+
 }
 

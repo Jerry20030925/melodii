@@ -862,41 +862,44 @@ private struct CommentItemView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 10) {
-                // 头像：优先使用真实头像
-                if let urlString = comment.author.avatarURL, let url = URL(string: urlString) {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .empty:
-                            Circle().fill(Color(.systemGray5))
-                                .frame(width: 28, height: 28)
-                                .overlay(ProgressView().scaleEffect(0.6))
-                        case .success(let image):
-                            image.resizable().scaledToFill()
-                                .frame(width: 28, height: 28)
-                                .clipShape(Circle())
-                        case .failure:
-                            Circle()
-                                .fill(LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .frame(width: 28, height: 28)
-                                .overlay(
-                                    Text(comment.author.initials)
-                                        .font(.system(size: 14, weight: .bold))
-                                        .foregroundStyle(.white)
-                                )
-                        @unknown default:
-                            Circle().fill(Color(.systemGray5)).frame(width: 28, height: 28)
+                // 头像：优先使用真实头像，添加点击查看主页功能
+                NavigationLink(destination: UserProfileView(user: comment.author)) {
+                    if let urlString = comment.author.avatarURL, let url = URL(string: urlString) {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .empty:
+                                Circle().fill(Color(.systemGray5))
+                                    .frame(width: 28, height: 28)
+                                    .overlay(ProgressView().scaleEffect(0.6))
+                            case .success(let image):
+                                image.resizable().scaledToFill()
+                                    .frame(width: 28, height: 28)
+                                    .clipShape(Circle())
+                            case .failure:
+                                Circle()
+                                    .fill(LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                    .frame(width: 28, height: 28)
+                                    .overlay(
+                                        Text(comment.author.initials)
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundStyle(.white)
+                                    )
+                            @unknown default:
+                                Circle().fill(Color(.systemGray5)).frame(width: 28, height: 28)
+                            }
                         }
+                    } else {
+                        Circle()
+                            .fill(LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 28, height: 28)
+                            .overlay(
+                                Text(comment.author.initials)
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(.white)
+                            )
                     }
-                } else {
-                    Circle()
-                        .fill(LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 28, height: 28)
-                        .overlay(
-                            Text(comment.author.initials)
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(.white)
-                        )
                 }
+                .buttonStyle(.plain)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {

@@ -48,17 +48,36 @@ struct RootView: View {
             }
         }
         .task {
-            // 在后台并行检查认证状态，不阻塞 UI
+            // 并行执行：动画和认证检查
             async let authCheck: Void = checkAuthInBackground()
+            async let animationDelay: Void = { try? await Task.sleep(for: .seconds(0.5)) }()
 
-            // 等待启动动画完成（缩短到2秒）
-            try? await Task.sleep(for: .seconds(2))
+            // 等待两者都完成，但最多等待2秒
+            let timeout: Task<Void, Never> = Task {
+                // Task.sleep(for:) can throw CancellationError when the task is cancelled.
+                // 我们有意用 try? 忽略取消错误
+                try? await Task.sleep(for: .seconds(2))
+                await MainActor.run {
+                    if isCheckingAuth {
+                        print("⚠️ 认证检查超时，直接进入应用")
+                        isCheckingAuth = false
+                    }
+                }
+            }
 
-            // 等待认证检查完成
+            // 等待动画和认证检查
+            await animationDelay
             await authCheck
-            isCheckingAuth = false
+
+            // 取消超时任务（非抛出、非异步）
+            timeout.cancel()
+
+            // 完成后解除加载状态
+            await MainActor.run {
+                isCheckingAuth = false
+            }
         }
-        // 新增：监听认证状态变化，认证后解除加载状态，解决登录后卡死
+        // 监听认证状态变化，认证完成后立即解除加载
         .onReceive(authService.objectWillChange) { _ in
             if authService.isAuthenticated {
                 isCheckingAuth = false

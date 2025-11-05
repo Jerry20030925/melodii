@@ -208,10 +208,20 @@ struct CreateView: View {
             .onChange(of: locationService.locationError) { oldValue, newValue in
                 // 当出现位置错误时，显示提示
                 if let error = newValue, !error.isEmpty {
-                    // 检查是否是权限问题
-                    if error.contains("权限") || error.contains("授权") {
-                        showLocationPermissionAlert = true
+                    // 只在明确是权限被拒绝时才显示权限提示
+                    // 不在超时或网络错误时显示权限提示
+                    if error.contains("权限未授权") || error.contains("请在设置中开启") {
+                        // 再次确认权限状态，避免误判
+                        let status = locationService.authorizationStatus
+                        if status == .denied || status == .restricted {
+                            showLocationPermissionAlert = true
+                        } else {
+                            // 权限实际上是允许的，只是定位失败了
+                            alertMessage = error
+                            showAlert = true
+                        }
                     } else {
+                        // 其他错误（超时、网络等）直接显示
                         alertMessage = error
                         showAlert = true
                     }

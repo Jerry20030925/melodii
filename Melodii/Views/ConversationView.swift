@@ -48,6 +48,9 @@ struct ConversationView: View {
     @State private var fullscreenImageUrl: String?
     @State private var showFullscreenImage = false
 
+    // 语音录制状态（用于按钮动画）
+    @State private var isRecording = false
+
     var body: some View {
         ZStack {
             backgroundView
@@ -91,33 +94,132 @@ struct ConversationView: View {
     // MARK: - Background
 
     private var backgroundView: some View {
-        let bgColors: [Color] = [
-            Color(.systemBackground),
-            Color(.systemGray6).opacity(0.3)
-        ]
-        return LinearGradient(colors: bgColors, startPoint: .top, endPoint: .bottom)
+        ZStack {
+            // 主背景渐变
+            LinearGradient(
+                colors: [
+                    Color(.systemBackground),
+                    Color(.systemGray6).opacity(0.2),
+                    Color.blue.opacity(0.03)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            // 装饰性气泡
+            GeometryReader { geometry in
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.purple.opacity(0.08), Color.clear],
+                            center: .topTrailing,
+                            startRadius: 0,
+                            endRadius: 300
+                        )
+                    )
+                    .frame(width: 400, height: 400)
+                    .offset(x: geometry.size.width - 100, y: -150)
+
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.blue.opacity(0.06), Color.clear],
+                            center: .bottomLeading,
+                            startRadius: 0,
+                            endRadius: 250
+                        )
+                    )
+                    .frame(width: 350, height: 350)
+                    .offset(x: -100, y: geometry.size.height - 150)
+            }
+        }
     }
 
     // MARK: - Header View
 
     private var headerView: some View {
         HStack(spacing: 12) {
-            // 头像
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [.purple.opacity(0.7), .pink.opacity(0.7)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 42, height: 42)
-                .overlay(
-                    Text(otherUser.initials)
-                        .font(.headline)
-                        .foregroundColor(.white)
-                )
+            // 头像 - 支持真实头像
+            NavigationLink(destination: UserProfileView(user: otherUser)) {
+                Group {
+                    if let avatarURL = otherUser.avatarURL, let url = URL(string: avatarURL) {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .empty:
+                                Circle()
+                                    .fill(Color(.systemGray5))
+                                    .frame(width: 42, height: 42)
+                                    .overlay(ProgressView().scaleEffect(0.6))
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 42, height: 42)
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(
+                                                LinearGradient(
+                                                    colors: [.purple.opacity(0.6), .pink.opacity(0.6)],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ),
+                                                lineWidth: 2
+                                            )
+                                    )
+                            case .failure:
+                                Circle()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.purple.opacity(0.7), .pink.opacity(0.7)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 42, height: 42)
+                                    .overlay(
+                                        Text(otherUser.initials)
+                                            .font(.headline)
+                                            .foregroundColor(.white)
+                                    )
+                            @unknown default:
+                                Circle()
+                                    .fill(Color(.systemGray5))
+                                    .frame(width: 42, height: 42)
+                            }
+                        }
+                    } else {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.purple.opacity(0.7), .pink.opacity(0.7)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 42, height: 42)
+                            .overlay(
+                                Text(otherUser.initials)
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                            )
+                    }
+                }
                 .shadow(color: .purple.opacity(0.3), radius: 4, x: 0, y: 2)
+                .overlay(
+                    // 在线状态指示器
+                    Circle()
+                        .fill(otherUser.isOnline ? Color.green : Color.gray)
+                        .frame(width: 12, height: 12)
+                        .overlay(
+                            Circle()
+                                .stroke(Color(.systemBackground), lineWidth: 2)
+                        )
+                        .offset(x: 15, y: 15)
+                        .shadow(color: otherUser.isOnline ? Color.green.opacity(0.5) : Color.clear, radius: 4)
+                )
+            }
+            .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(otherUser.nickname)
@@ -190,6 +292,10 @@ struct ConversationView: View {
                                 },
                                 onCopy: {
                                     UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                },
+                                onImageTap: { url in
+                                    fullscreenImageUrl = url
+                                    showFullscreenImage = true
                                 }
                             )
                             .id(msg.id)
@@ -257,89 +363,223 @@ struct ConversationView: View {
 
     private var inputBarView: some View {
         VStack(spacing: 0) {
+            // 快捷表情按钮栏
+            quickEmojiBar
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial)
+
             Divider()
 
+            // 主输入区域
             HStack(spacing: 12) {
-                // 图片和视频按钮
-                PhotosPicker(selection: $selectedPhotoItem, matching: .any(of: [.images, .videos])) {
-                    Image(systemName: "photo")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
-                .disabled(isUploadingImage)
-                .onChange(of: selectedPhotoItem) { _, newValue in
-                    if newValue != nil {
-                        Task { await handleMediaSelection() }
-                    }
-                }
-
-                // 表情按钮
+                // 左侧功能按钮 - 更多选项
                 Button {
-                    showEmojiPicker.toggle()
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        showEmojiPicker.toggle()
+                    }
                     isInputFocused = false
-                } label: {
-                    Image(systemName: showEmojiPicker ? "face.smiling.fill" : "face.smiling")
-                        .font(.title3)
-                        .foregroundStyle(showEmojiPicker ? .blue : .secondary)
-                }
-
-                // 输入框
-                TextField("输入消息...", text: $inputText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
-                    .lineLimit(1...6)
-                    .focused($isInputFocused)
-                    .onChange(of: inputText) { _, newValue in
-                        handleTyping(newValue)
-                    }
-
-                // 发送按钮
-                Button {
-                    Task { await send() }
                 } label: {
                     ZStack {
                         Circle()
-                            .fill(
-                                inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                ? AnyShapeStyle(Color(.systemGray5))
-                                : AnyShapeStyle(LinearGradient(
-                                    colors: [.blue, .purple],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ))
-                            )
-                            .frame(width: 40, height: 40)
+                            .fill(Color(.systemGray6))
+                            .frame(width: 42, height: 42)
 
-                        if isSending {
-                            ProgressView()
-                                .tint(.white)
-                        } else {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundStyle(.white)
+                        Image(systemName: "app.grid.2x2")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.primary)
+                    }
+                }
+
+                // 输入框
+                HStack(spacing: 8) {
+                    TextField("发送消息", text: $inputText, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...6)
+                        .focused($isInputFocused)
+                        .onChange(of: inputText) { _, newValue in
+                            handleTyping(newValue)
+                        }
+
+                    if !inputText.isEmpty {
+                        Button {
+                            inputText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                                .font(.system(size: 16))
+                        }
+                        .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 24))
+
+                // 右侧圆形按钮组
+                HStack(spacing: 8) {
+                    // 语音按钮
+                    Button {
+                        // TODO: 实现语音录制
+                        isRecording.toggle()
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(Color(.systemGray6))
+                                .frame(width: 42, height: 42)
+
+                            Image(systemName: "waveform")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                    .scaleEffect(isRecording ? 1.1 : 1.0)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isRecording)
+
+                    // 表情按钮
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            showEmojiPicker.toggle()
+                        }
+                        isInputFocused = false
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(showEmojiPicker ? Color.blue.opacity(0.15) : Color(.systemGray6))
+                                .frame(width: 42, height: 42)
+
+                            Image(systemName: showEmojiPicker ? "face.smiling.fill" : "face.smiling")
+                                .font(.system(size: 18))
+                                .foregroundStyle(showEmojiPicker ? .blue : .primary)
+                        }
+                    }
+
+                    // 加号按钮 - 图片和更多
+                    PhotosPicker(selection: $selectedPhotoItem, matching: .any(of: [.images, .videos])) {
+                        ZStack {
+                            Circle()
+                                .fill(Color(.systemGray6))
+                                .frame(width: 42, height: 42)
+
+                            Image(systemName: "plus")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                    .disabled(isUploadingImage)
+                    .onChange(of: selectedPhotoItem) { _, newValue in
+                        if newValue != nil {
+                            Task { await handleMediaSelection() }
                         }
                     }
                 }
-                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
-                .scaleEffect(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.9 : 1.0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: inputText.isEmpty)
+
+                // 发送按钮（仅在有文字时显示）
+                if !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        Task { await send() }
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color(red: 0.0, green: 0.48, blue: 1.0), Color(red: 0.5, green: 0.4, blue: 1.0)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: 42, height: 42)
+                                .shadow(color: .blue.opacity(0.3), radius: 8, x: 0, y: 4)
+
+                            if isSending {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                    }
+                    .disabled(isSending)
+                    .transition(.scale.combined(with: .opacity))
+                }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
             .background(.ultraThinMaterial)
 
             // 表情选择器
             if showEmojiPicker {
                 EmojiPickerView(onSelect: { emoji in
                     inputText += emoji
-                    showEmojiPicker = false
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        showEmojiPicker = false
+                    }
                 })
                 .frame(height: 280)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+        }
+    }
+
+    // MARK: - Quick Emoji Bar
+
+    private var quickEmojiBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(quickEmojis, id: \.text) { emoji in
+                    Button {
+                        sendQuickEmoji(emoji.text)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(emoji.emoji)
+                                .font(.title3)
+                            Text(emoji.text)
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule()
+                                .fill(Color(.systemGray6))
+                        )
+                        .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(QuickEmojiButtonStyle())
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+    }
+
+    // 快捷表情数据
+    private let quickEmojis: [(emoji: String, text: String)] = [
+        ("⭐", "晚上好"),
+        ("😘", "比个心"),
+        ("👍", "赞"),
+        ("😂", "搞脸"),
+        ("🌹", "玫瑰"),
+        ("❤️", "爱你"),
+        ("🎉", "庆祝"),
+        ("👋", "你好"),
+        ("😊", "微笑"),
+        ("🔥", "火"),
+        ("💯", "完美"),
+        ("👏", "鼓掌")
+    ]
+
+    // 发送快捷表情
+    private func sendQuickEmoji(_ text: String) {
+        // 添加触觉反馈
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        inputText = text
+        Task {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒延迟
+            await send()
         }
     }
 
@@ -566,6 +806,8 @@ struct ConversationView: View {
                 }
                 if !unread.isEmpty {
                     UnreadCenter.shared.decrementMessages(unread.count)
+                    // 更新应用badge
+                    await NotificationManager.shared.updateBadgeCount(UnreadCenter.shared.unreadMessages + UnreadCenter.shared.unreadNotifications)
                 }
             }
         } catch {
@@ -603,6 +845,11 @@ struct ConversationView: View {
                     // 对方发来的消息，立即标记已读并减少未读计数
                     try? await supabaseService.markMessageAsRead(messageId: msg.id)
                     UnreadCenter.shared.decrementMessages(1)
+
+                    // 更新应用badge
+                    Task {
+                        await NotificationManager.shared.updateBadgeCount(UnreadCenter.shared.unreadMessages + UnreadCenter.shared.unreadNotifications)
+                    }
 
                     // 触觉反馈
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -773,6 +1020,9 @@ private struct MessageBubble: View {
                                     .scaledToFill()
                                     .frame(maxWidth: 200, maxHeight: 300)
                                     .clipShape(RoundedRectangle(cornerRadius: 16))
+                                    .onTapGesture {
+                                        onImageTap?(message.content)
+                                    }
                             case .failure:
                                 ZStack {
                                     RoundedRectangle(cornerRadius: 16)
@@ -806,14 +1056,39 @@ private struct MessageBubble: View {
                             .background(
                                 Group {
                                     if isMe {
-                                        LinearGradient(
-                                            colors: [Color(red: 0.0, green: 0.48, blue: 1.0), Color(red: 0.5, green: 0.4, blue: 1.0)],
-                                            startPoint: .topLeading,
-                                            endPoint: .bottomTrailing
-                                        )
+                                        ZStack {
+                                            // 外层光晕效果
+                                            LinearGradient(
+                                                colors: [Color(red: 0.0, green: 0.48, blue: 1.0), Color(red: 0.5, green: 0.4, blue: 1.0)],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            )
+                                            .blur(radius: 8)
+                                            .opacity(0.3)
+
+                                            // 主体渐变
+                                            LinearGradient(
+                                                colors: [Color(red: 0.0, green: 0.48, blue: 1.0), Color(red: 0.5, green: 0.4, blue: 1.0)],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            )
+                                        }
                                     } else {
-                                        RoundedRectangle(cornerRadius: 20)
-                                            .fill(Color(.systemGray6))
+                                        ZStack {
+                                            // 添加微妙的边框光泽效果
+                                            RoundedRectangle(cornerRadius: 20)
+                                                .fill(Color(.systemGray6))
+
+                                            RoundedRectangle(cornerRadius: 20)
+                                                .stroke(
+                                                    LinearGradient(
+                                                        colors: [Color.white.opacity(0.5), Color.clear],
+                                                        startPoint: .topLeading,
+                                                        endPoint: .bottomTrailing
+                                                    ),
+                                                    lineWidth: 0.5
+                                                )
+                                        }
                                     }
                                 }
                             )
@@ -821,10 +1096,10 @@ private struct MessageBubble: View {
                                 RoundedRectangle(cornerRadius: 20)
                             )
                             .shadow(
-                                color: isMe ? Color.blue.opacity(0.3) : Color.black.opacity(0.08),
-                                radius: isMe ? 8 : 5,
+                                color: isMe ? Color.blue.opacity(0.25) : Color.black.opacity(0.05),
+                                radius: isMe ? 10 : 3,
                                 x: 0,
-                                y: 2
+                                y: isMe ? 4 : 1
                             )
                     }
                 }
@@ -865,7 +1140,8 @@ private struct MessageBubble: View {
 
 private struct PendingMessageBubble: View {
     let content: String
-    @State private var opacity: Double = 0.6
+    @State private var opacity: Double = 0.7
+    @State private var shimmerOffset: CGFloat = -200
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -884,21 +1160,34 @@ private struct PendingMessageBubble: View {
                 .padding(.vertical, 12)
                 .foregroundColor(.white)
                 .background(
-                    LinearGradient(
-                        colors: [Color(red: 0.0, green: 0.48, blue: 1.0).opacity(0.7), Color(red: 0.5, green: 0.4, blue: 1.0).opacity(0.7)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
+                    ZStack {
+                        // 主体渐变
+                        LinearGradient(
+                            colors: [Color(red: 0.0, green: 0.48, blue: 1.0).opacity(0.65), Color(red: 0.5, green: 0.4, blue: 1.0).opacity(0.65)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+
+                        // 闪烁效果
+                        LinearGradient(
+                            colors: [Color.clear, Color.white.opacity(0.3), Color.clear],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .offset(x: shimmerOffset)
+                        .blur(radius: 3)
+                    }
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 20))
                 .opacity(opacity)
-                .shadow(color: Color.blue.opacity(0.2), radius: 6, x: 0, y: 2)
+                .shadow(color: Color.blue.opacity(0.15), radius: 8, x: 0, y: 3)
 
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     ProgressView()
                         .scaleEffect(0.7)
                     Text("发送中")
                         .font(.caption2)
+                        .fontWeight(.medium)
                 }
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)
@@ -906,8 +1195,14 @@ private struct PendingMessageBubble: View {
         }
         .padding(.horizontal, 4)
         .onAppear {
-            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                opacity = 1.0
+            // 呼吸效果
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                opacity = 0.95
+            }
+
+            // 闪烁效果
+            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                shimmerOffset = 200
             }
         }
     }
@@ -1065,6 +1360,17 @@ private struct EmojiPickerView: View {
 private struct EmojiCategory {
     let name: String
     let emojis: [String]
+}
+
+// MARK: - Quick Emoji Button Style
+
+struct QuickEmojiButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
+    }
 }
 
 #Preview {

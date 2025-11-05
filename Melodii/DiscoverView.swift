@@ -217,13 +217,25 @@ struct DiscoverView: View {
     private func refreshWithRecommendations() async {
         isRefreshing = true
         defer { isRefreshing = false }
+
+        // 先完全重置并刷新当前feed
+        await MainActor.run {
+            switch selectedFeedType {
+            case .recommended:
+                recommendedState.reset()
+            case .following:
+                followingState.reset()
+            }
+        }
         await refreshCurrentFeed()
 
-        // 推荐3-5篇新帖子（不重复）
+        // 推荐3-5篇新帖子（使用随机offset来获取不同内容）
         let count = Int.random(in: 3...5)
         guard let uid = authService.currentUser?.id else { return }
         do {
-            let recs = try await supabaseService.fetchRecommendedPosts(userId: uid, limit: count, offset: 0)
+            // 使用随机offset来避免总是获取相同的帖子
+            let randomOffset = Int.random(in: 0...10)
+            let recs = try await supabaseService.fetchRecommendedPosts(userId: uid, limit: count, offset: randomOffset)
             let existingIds = Set(currentPosts.map { $0.id })
             let newOnes = recs.filter { !existingIds.contains($0.id) }
             if !newOnes.isEmpty {
