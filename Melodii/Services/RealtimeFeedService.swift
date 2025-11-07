@@ -1,6 +1,6 @@
 import Foundation
-import Combine
 import Supabase
+import Combine
 
 @MainActor
 final class RealtimeFeedService: ObservableObject {

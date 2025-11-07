@@ -6,6 +6,8 @@
 //
 
 import SwiftUI
+import Supabase
+import PostgREST
 
 struct DailyChallengeView: View {
     @State private var challenges: [Challenge] = Challenge.daily
@@ -205,14 +207,199 @@ struct DailyChallengeView: View {
         // 触觉反馈
         UINotificationFeedbackGenerator().notificationOccurred(.success)
 
-        // TODO: 保存进度
+        // 保存进度到服务器
+        Task { await saveChallengeProgress(challenge) }
     }
 
     private func loadProgress() {
-        // TODO: 从本地或服务器加载
-        streak = 0
-        totalPoints = 0
-        completedChallenges = []
+        Task { await loadChallengeProgressFromServer() }
+    }
+    
+    // MARK: - Data Persistence
+    
+    private func saveChallengeProgress(_ challenge: Challenge) async {
+        guard let userId = AuthService.shared.currentUser?.id else { return }
+        
+        struct ChallengeCompletionInsert: Encodable {
+            let id: String
+            let user_id: String
+            let challenge_id: String
+            let challenge_type: String
+            let points_earned: Int
+            let completed_date: String
+            let created_at: String
+        }
+        
+        do {
+            let today = DateFormatter.yyyyMMdd.string(from: Date())
+            
+            // 保存挑战完成记录
+            let record = ChallengeCompletionInsert(
+                id: UUID().uuidString,
+                user_id: userId,
+                challenge_id: challenge.id,
+                challenge_type: "daily",
+                points_earned: challenge.points,
+                completed_date: today,
+                created_at: ISO8601DateFormatter().string(from: Date())
+            )
+            
+            try await SupabaseService.shared.client
+                .from("challenge_completions")
+                .insert(record)
+                .execute()
+            
+            // 更新用户总积分
+            await updateUserTotalPoints(add: challenge.points)
+            
+            print("✅ 挑战完成记录已保存: \(challenge.title)")
+        } catch {
+            print("❌ 保存挑战进度失败: \(error)")
+        }
+    }
+    
+    private func updateUserTotalPoints(add points: Int) async {
+        guard let userId = AuthService.shared.currentUser?.id else { return }
+        
+        struct UserPointsInsert: Encodable {
+            let user_id: String
+            let total_points: Int
+            let created_at: String
+        }
+        struct UserPointsUpdate: Encodable {
+            let total_points: Int
+        }
+        
+        do {
+            // 尝试获取现有记录
+            let response = try await SupabaseService.shared.client
+                .from("user_points")
+                .select("total_points")
+                .eq("user_id", value: userId)
+                .execute()
+            
+            if let data = try? JSONSerialization.jsonObject(with: response.data) as? [[String: Any]],
+               let first = data.first,
+               let existingPoints = first["total_points"] as? Int {
+                // 更新现有记录
+                let updatePayload = UserPointsUpdate(total_points: existingPoints + points)
+                try await SupabaseService.shared.client
+                    .from("user_points")
+                    .update(updatePayload)
+                    .eq("user_id", value: userId)
+                    .execute()
+            } else {
+                // 创建新记录
+                let insertPayload = UserPointsInsert(
+                    user_id: userId,
+                    total_points: totalPoints,
+                    created_at: ISO8601DateFormatter().string(from: Date())
+                )
+                
+                try await SupabaseService.shared.client
+                    .from("user_points")
+                    .insert(insertPayload)
+                    .execute()
+            }
+            
+            print("✅ 用户积分更新: +\(points)")
+        } catch {
+            print("❌ 更新用户积分失败: \(error)")
+        }
+    }
+    
+    private func loadChallengeProgressFromServer() async {
+        guard let userId = AuthService.shared.currentUser?.id else { return }
+        
+        do {
+            let today = DateFormatter.yyyyMMdd.string(from: Date())
+            
+            // 加载今日完成的挑战
+            let completionsResponse = try await SupabaseService.shared.client
+                .from("challenge_completions")
+                .select("challenge_id")
+                .eq("user_id", value: userId)
+                .eq("completed_date", value: today)
+                .execute()
+            
+            if let data = try? JSONSerialization.jsonObject(with: completionsResponse.data) as? [[String: Any]] {
+                let completedIds = data.compactMap { $0["challenge_id"] as? String }
+                await MainActor.run {
+                    completedChallenges = Set(completedIds)
+                }
+            }
+            
+            // 加载用户总积分
+            let pointsResponse = try await SupabaseService.shared.client
+                .from("user_points")
+                .select("total_points")
+                .eq("user_id", value: userId)
+                .execute()
+            
+            if let data = try? JSONSerialization.jsonObject(with: pointsResponse.data) as? [[String: Any]],
+               let first = data.first,
+               let points = first["total_points"] as? Int {
+                await MainActor.run {
+                    totalPoints = points
+                }
+            }
+            
+            // 计算连续打卡天数
+            await calculateStreak()
+            
+            print("✅ 挑战进度加载完成")
+        } catch {
+            print("❌ 加载挑战进度失败: \(error)")
+        }
+    }
+    
+    private func calculateStreak() async {
+        guard let userId = AuthService.shared.currentUser?.id else { return }
+        
+        do {
+            // 获取最近30天的完成记录
+            let calendar = Calendar.current
+            let today = Date()
+            let thirtyDaysAgo = calendar.date(byAdding: .day, value: -30, to: today)!
+            
+            let startDate = DateFormatter.yyyyMMdd.string(from: thirtyDaysAgo)
+            let endDate = DateFormatter.yyyyMMdd.string(from: today)
+            
+            let response = try await SupabaseService.shared.client
+                .from("challenge_completions")
+                .select("completed_date")
+                .eq("user_id", value: userId)
+                .gte("completed_date", value: startDate)
+                .lte("completed_date", value: endDate)
+                .execute()
+            
+            if let data = try? JSONSerialization.jsonObject(with: response.data) as? [[String: Any]] {
+                let completedDates = data.compactMap { $0["completed_date"] as? String }
+                let uniqueDates = Set(completedDates)
+                
+                // 计算连续天数
+                var currentStreak = 0
+                var currentDate = today
+                
+                while true {
+                    let dateString = DateFormatter.yyyyMMdd.string(from: currentDate)
+                    if uniqueDates.contains(dateString) {
+                        currentStreak += 1
+                        currentDate = calendar.date(byAdding: .day, value: -1, to: currentDate)!
+                    } else {
+                        break
+                    }
+                }
+                
+                await MainActor.run {
+                    streak = currentStreak
+                }
+            }
+            
+            print("✅ 连续打卡天数: \(streak)")
+        } catch {
+            print("❌ 计算连续打卡失败: \(error)")
+        }
     }
 }
 
@@ -546,6 +733,16 @@ struct Reward {
         message: "你真棒！继续保持这个势头",
         bonus: 50
     )
+}
+
+// MARK: - Date Formatter Extension
+
+extension DateFormatter {
+    static let yyyyMMdd: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 }
 
 #Preview {

@@ -11,9 +11,15 @@ import PhotosUI
 import AVFoundation
 import UIKit
 
+enum CreateMode: Hashable {
+    case post
+    case melomoment
+}
+
 struct CreateView: View {
     // 外部传入：草稿（可选）
     let draftPost: Post?
+    let initialMode: CreateMode
 
     // 依赖服务
     @ObservedObject private var authService = AuthService.shared
@@ -25,6 +31,10 @@ struct CreateView: View {
     @State private var mediaURLs: [String] = []         // 已上传成功的媒体URL（图片/视频混合）
     @State private var topics: [String] = []
     @State private var moodTags: [String] = []
+    
+    // 音乐选择
+    @State private var selectedMusic: MusicRecommendation?
+    @State private var showMusicSelector = false
 
     // 选项区状态
     @State private var city: String = ""
@@ -44,6 +54,12 @@ struct CreateView: View {
     @State private var uploadProgress: Double = 0.0
     @State private var uploadingCount: Int = 0
     @State private var totalUploadCount: Int = 0
+    
+    // Melomoment 上传（迁移到创作页）
+    @State private var melomomentItem: PhotosPickerItem? = nil
+    @State private var isUploadingMoment: Bool = false
+    @State private var addRippleProgress: CGFloat = 0
+    @State private var showAddRipple: Bool = false
 
     // 上传体积阈值（根据 Supabase Storage 典型限制做保守设置）
     private let maxImageBytes: Int = 4 * 1024 * 1024     // 4MB
@@ -59,77 +75,99 @@ struct CreateView: View {
     // Extracted grid columns to reduce type-checking complexity
     private static let mediaGridColumns: [GridItem] = [GridItem(.adaptive(minimum: 90), spacing: 8)]
 
-    init(draftPost: Post?) {
+    @State private var createMode: CreateMode = .post
+
+    init(draftPost: Post?, initialMode: CreateMode = .post) {
         self.draftPost = draftPost
+        self.initialMode = initialMode
+        _createMode = State(initialValue: initialMode)
+    }
+    
+    // MARK: - Background gradient extraction
+    
+    private var backgroundGradientColors: [Color] {
+        let base = Color(.systemGroupedBackground)
+        let tail = Color(.systemBackground)
+        // compute a soft tint from selected music category if available
+        let tint: Color = {
+            guard let music = selectedMusic else { return base }
+            // category.gradient returns [Color]; use first if present
+            if let first = music.category.gradient.first {
+                return first.opacity(0.05)
+            }
+            return base
+        }()
+        return [base, tint, tail]
     }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    // 文本输入区域
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("内容")
-                                .font(.headline)
-                                .fontWeight(.semibold)
-                            
-                            Spacer()
-                            
-                            Text("\(text.count)/500")
-                                .font(.caption)
-                                .foregroundStyle(text.count > 450 ? .red : .secondary)
+            ZStack {
+                // 动态渐变背景（extracted colors to help type checker）
+                LinearGradient(
+                    colors: backgroundGradientColors,
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 0.8), value: selectedMusic?.id)
+                
+                ScrollView {
+                    VStack(spacing: 24) {
+                        // 创作类型切换
+                        Picker("创作类型", selection: $createMode) {
+                            Text("发帖").tag(CreateMode.post)
+                            Text("Melomoment").tag(CreateMode.melomoment)
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
+                        
+                        // 当选择 Melomoment 时，显示专属上传区；否则显示发帖内容区
+                        if createMode == .melomoment {
+                            melomomentCreateSection
                         }
                         
-                        TextEditor(text: $text)
-                            .frame(minHeight: 160)
-                            .padding(16)
-                            .background(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .fill(Color(.systemBackground))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 16)
-                                            .stroke(
-                                                isTextEditorFocused ? Color.blue.opacity(0.3) : Color(.systemGray4), 
-                                                lineWidth: 1.5
-                                            )
-                                    )
-                            )
-                            .overlay(
-                                ZStack(alignment: .topLeading) {
-                                    if text.isEmpty {
-                                        Text("分享你的想法、心情或有趣的事情...")
-                                            .foregroundStyle(.secondary)
-                                            .padding(.horizontal, 24)
-                                            .padding(.vertical, 24)
-                                            .allowsHitTesting(false)
-                                    }
-                                }
-                            )
-                            .focused($isTextEditorFocused)
-                            .scrollContentBackground(.hidden)
-                            .animation(.easeInOut(duration: 0.2), value: isTextEditorFocused)
-                    }
+                        // 文本输入区域（仅发帖模式显示）
+                        if createMode == .post {
+                            postTextSection
+                        }
 
-                    // 媒体部分
-                    if !mediaURLs.isEmpty || !isUploading {
+                    // 发帖模式内容
+                    if createMode == .post {
+                        // 媒体部分
+                        if !mediaURLs.isEmpty || !isUploading {
                         mediaSection
-                    }
-
-                    // 选项区（定位 + 匿名）
-                    optionsSection
-
-                    // 话题与标签
-                    if !topics.isEmpty || !moodTags.isEmpty {
-                        tagsSection
-                    }
+                            .transition(.asymmetric(
+                                insertion: .scale.combined(with: .opacity),
+                                removal: .scale.combined(with: .opacity)
+                            ))
+                        }
                     
-                    // 底部间距
-                    Spacer(minLength: 100)
+                        // 音乐选择区域
+                        MusicSelectionSection(
+                            selectedMusic: $selectedMusic,
+                            showMusicSelector: $showMusicSelector
+                        )
+                        .scaleEffect(selectedMusic != nil ? 1.02 : 1.0)
+                        .animation(.spring(response: 0.6, dampingFraction: 0.8), value: selectedMusic?.id)
+
+                        // 选项区（定位 + 匿名）
+                        optionsSection
+
+                        // 话题与标签
+                        if !topics.isEmpty || !moodTags.isEmpty {
+                            tagsSection
+                        }
+                    
+                            // 底部间距
+                            Spacer(minLength: 100)
+                    }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 20)
                 }
-                .padding(20)
             }
-            .background(Color(.systemGroupedBackground))
             .contentShape(Rectangle())
             .onTapGesture {
                 isTextEditorFocused = false
@@ -150,17 +188,19 @@ struct CreateView: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await submit() }
-                    } label: {
-                        if isSubmitting {
-                            ProgressView()
-                        } else {
-                            Text(draftPost == nil ? "发布" : "更新")
-                                .fontWeight(.semibold)
+                    if createMode == .post {
+                        Button {
+                            Task { await submit() }
+                        } label: {
+                            if isSubmitting {
+                                ProgressView()
+                            } else {
+                                Text(draftPost == nil ? "发布" : "更新")
+                                    .fontWeight(.semibold)
+                            }
                         }
+                        .disabled(isSubmitting || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && mediaURLs.isEmpty))
                     }
-                    .disabled(isSubmitting || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && mediaURLs.isEmpty))
                 }
             }
             .task {
@@ -171,6 +211,7 @@ struct CreateView: View {
                     moodTags = draft.moodTags
                     city = draft.city ?? ""
                     isAnonymous = draft.isAnonymous
+                    // TODO: 加载草稿的音乐选择
                 }
             }
             .alert("提示", isPresented: $showAlert) {
@@ -190,6 +231,9 @@ struct CreateView: View {
             }
             .sheet(isPresented: $showViewer) {
                 FullscreenMediaViewer(urls: mediaURLs, isPresented: $showViewer, index: viewerIndex)
+            }
+            .sheet(isPresented: $showMusicSelector) {
+                MusicSelectorSheet(selectedMusic: $selectedMusic)
             }
             .overlay(
                 // 发布进度覆盖层
@@ -229,7 +273,120 @@ struct CreateView: View {
                     UINotificationFeedbackGenerator().notificationOccurred(.error)
                 }
             }
+            .onChange(of: melomomentItem) { oldValue, newValue in
+                Task { await handlePickMelomomentFromCreate(newValue) }
+            }
         }
+    }
+    
+    // MARK: - 抽出文本输入区域，降低 body 复杂度
+    @ViewBuilder
+    private var postTextSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                HStack(spacing: 8) {
+                    Image(systemName: "text.cursor")
+                        .font(.title3)
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.blue, .purple],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    
+                    Text("内容")
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                }
+                
+                Spacer()
+                
+                Text("\(text.count)/500")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(text.count > 450 ? .red : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(text.count > 450 ? Color.red.opacity(0.1) : Color(.systemGray6))
+                    )
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: text.count)
+            }
+        
+            TextEditor(text: $text)
+                .frame(minHeight: 180)
+                .padding(20)
+                .background(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 20)
+                            .fill(Color(.systemBackground))
+                        
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(
+                                isTextEditorFocused ?
+                                    LinearGradient(
+                                        colors: [.blue.opacity(0.6), .purple.opacity(0.6)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ) :
+                                    LinearGradient(
+                                        colors: [Color(.systemGray4), Color(.systemGray4)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                lineWidth: isTextEditorFocused ? 2 : 1
+                            )
+                        
+                        if isTextEditorFocused {
+                            RoundedRectangle(cornerRadius: 20)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [.blue.opacity(0.03), .purple.opacity(0.03)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                        }
+                    }
+                )
+                .overlay(
+                    ZStack(alignment: .topLeading) {
+                        if text.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("分享你的想法、心情或有趣的事情...")
+                                    .font(.body)
+                                    .foregroundStyle(.tertiary)
+                                
+                                HStack(spacing: 4) {
+                                    Text("💭")
+                                    Text("记录此刻的美好")
+                                        .font(.caption)
+                                        .foregroundStyle(.quaternary)
+                                }
+                            }
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 28)
+                            .allowsHitTesting(false)
+                            .opacity(isTextEditorFocused ? 0.6 : 1.0)
+                            .animation(.easeInOut(duration: 0.2), value: isTextEditorFocused)
+                        }
+                    }
+                )
+                .focused($isTextEditorFocused)
+                .scrollContentBackground(.hidden)
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isTextEditorFocused)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
+        .scaleEffect(isTextEditorFocused ? 1.01 : 1.0)
+        .shadow(
+            color: isTextEditorFocused ? Color.blue.opacity(0.1) : .clear,
+            radius: isTextEditorFocused ? 12 : 0,
+            x: 0,
+            y: isTextEditorFocused ? 6 : 0
+        )
     }
     
     // MARK: - Progress Overlay
@@ -302,9 +459,21 @@ struct CreateView: View {
     private var mediaSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("媒体")
-                    .font(.headline)
-                    .fontWeight(.semibold)
+                HStack(spacing: 8) {
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.title3)
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.orange, .pink],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    
+                    Text("媒体")
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                }
                 
                 Spacer()
                 
@@ -313,11 +482,11 @@ struct CreateView: View {
                         HStack(spacing: 8) {
                             ProgressView(value: uploadProgress)
                                 .frame(width: 60)
-                                .tint(.blue)
+                                .tint(.orange)
                             Text("\(Int(uploadProgress * 100))%")
                                 .font(.caption2)
                                 .fontWeight(.medium)
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(.orange)
                         }
                         Text("上传中 \(uploadingCount)/\(totalUploadCount)")
                             .font(.caption2)
@@ -326,7 +495,12 @@ struct CreateView: View {
                 } else if !mediaURLs.isEmpty {
                     Text("\(mediaURLs.count)/9")
                         .font(.caption)
+                        .fontWeight(.medium)
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(.systemGray6))
+                        .clipShape(Capsule())
                 }
             }
 
@@ -366,13 +540,197 @@ struct CreateView: View {
         }
         .padding(20)
         .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(.systemBackground))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color(.systemGray5), lineWidth: 1)
-                )
+            ZStack {
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(Color(.systemBackground))
+                
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.orange.opacity(0.3), Color.pink.opacity(0.3)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1.5
+                    )
+            }
         )
+        .shadow(
+            color: Color.orange.opacity(0.1),
+            radius: 8, x: 0, y: 4
+        )
+    }
+
+    // MARK: - Melomoment 专属上传区（同款渐变环 + 涟漪）
+    private var melomomentCreateSection: some View {
+        VStack(spacing: 16) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Melomoment")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.purple, .pink, .orange],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                    Text("分享此刻")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .opacity(0.8)
+                }
+                Spacer()
+                PhotosPicker(selection: $melomomentItem, matching: .images) {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            Circle()
+                                .stroke(
+                                    AngularGradient(
+                                        colors: [.pink, .orange, .purple, .blue, .cyan, .pink],
+                                        center: .center,
+                                        startAngle: .degrees(0),
+                                        endAngle: .degrees(270)
+                                    ),
+                                    lineWidth: 2
+                                )
+                                .frame(width: 36, height: 36)
+                                .overlay(
+                                    Circle()
+                                        .trim(from: 0, to: addRippleProgress)
+                                        .stroke(
+                                            AngularGradient(
+                                                colors: [.pink.opacity(0.6), .purple.opacity(0.6), .orange.opacity(0.6)],
+                                                center: .center
+                                            ),
+                                            style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                                        )
+                                        .frame(width: 40, height: 40)
+                                        .rotationEffect(.degrees(-90))
+                                        .opacity(showAddRipple ? 1 : 0)
+                                )
+                            Circle()
+                                .fill(Color.pink)
+                                .frame(width: 28, height: 28)
+                                .shadow(color: .pink.opacity(0.4), radius: 6, x: 0, y: 2)
+                                .overlay(
+                                    Image(systemName: "camera.fill")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(.white)
+                                )
+                        }
+                        Text("添加")
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.pink)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                Color.pink.opacity(0.15),
+                                                Color.orange.opacity(0.15)
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(
+                                        LinearGradient(
+                                            colors: [.purple.opacity(0.3), .pink.opacity(0.2)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        ),
+                                        lineWidth: 1
+                                    )
+                            )
+                    }
+                    .shadow(color: .purple.opacity(0.2), radius: 8, x: 0, y: 4)
+                }
+                .onTapGesture {
+                    let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                    impactFeedback.impactOccurred()
+                    showAddRipple = true
+                    addRippleProgress = 0
+                    withAnimation(.easeOut(duration: 0.6)) { addRippleProgress = 1 }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        showAddRipple = false
+                        addRippleProgress = 0
+                    }
+                }
+                .accessibilityLabel("添加 Melomoment")
+            }
+
+            VStack(spacing: 8) {
+                Text("选择一张照片，我们将直接发布为 Melomoment")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if isUploadingMoment {
+                    ProgressView("正在上传…")
+                        .tint(.pink)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(.systemBackground))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.purple.opacity(0.25), .pink.opacity(0.25)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1
+                            )
+                    )
+            )
+        }
+        .padding(.horizontal, 16)
+    }
+
+    // MARK: - Melomoment 上传处理（创作页）
+    private func handlePickMelomomentFromCreate(_ item: PhotosPickerItem?) async {
+        guard !isUploadingMoment, let item else { return }
+        guard let me = authService.currentUser?.id else { return }
+        isUploadingMoment = true
+        defer { isUploadingMoment = false }
+
+        do {
+            if let data = try await item.loadTransferable(type: Data.self) {
+                let mime = "image/jpeg"
+                let url = try await supabaseService.uploadUserMedia(
+                    data: data,
+                    mime: mime,
+                    fileName: nil,
+                    folder: "moments/\(me)"
+                )
+
+                _ = try await supabaseService.createMoment(
+                    authorId: me,
+                    mediaURL: url,
+                    caption: nil
+                )
+
+                await MainActor.run {
+                    alertMessage = "Melomoment 发布成功"
+                    showAlert = true
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
+            }
+        } catch {
+            await MainActor.run {
+                alertMessage = "上传失败，请稍后重试"
+                showAlert = true
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+        }
     }
 
     // MARK: - 选项区（定位 + 匿名）
@@ -636,7 +994,7 @@ struct CreateView: View {
                     city: city.isEmpty ? nil : city,
                     isAnonymous: isAnonymous,
                     mediaURLs: mediaURLs,
-                    status: .published
+                    status: PostStatus.published
                 )
                 
                 await updateProgress(1.0, "更新完成！")
@@ -677,6 +1035,7 @@ struct CreateView: View {
                 moodTags = []
                 city = ""
                 isAnonymous = false
+                selectedMusic = nil
                 
                 alertMessage = "发布成功！你的动态已经发布到社区"
                 showAlert = true
@@ -1115,4 +1474,164 @@ private struct VideoThumbnailView: View {
     NavigationStack {
         CreateView(draftPost: nil)
     }
+    .onAppear {
+        // 预览时显示一些示例数据
+        print("🎵 创作页面预览 - 音乐功能已就绪")
+        print("✅ 可以选择背景音乐")
+        print("✅ 支持音乐预览播放")
+        print("✅ 动态背景颜色根据音乐类别变化")
+        print("✅ 优化的UI设计和动画效果")
+    }
 }
+
+// MARK: - Full Screen Media Viewer
+
+struct FullscreenMediaViewer: View {
+    let urls: [String]
+    @Binding var isPresented: Bool
+    let index: Int
+    
+    @State private var currentIndex: Int
+    
+    init(urls: [String], isPresented: Binding<Bool>, index: Int) {
+        self.urls = urls
+        self._isPresented = isPresented
+        self.index = index
+        _currentIndex = State(initialValue: index)
+    }
+    
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                
+                if urls.isEmpty {
+                    VStack {
+                        Image(systemName: "photo.badge.exclamationmark")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text("无媒体内容")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    TabView(selection: $currentIndex) {
+                        ForEach(Array(urls.enumerated()), id: \.offset) { idx, url in
+                            MediaFullScreenView(url: url)
+                                .tag(idx)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .ignoresSafeArea()
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("关闭") {
+                        isPresented = false
+                    }
+                    .foregroundStyle(.white)
+                }
+                
+                ToolbarItem(placement: .principal) {
+                    if urls.count > 1 {
+                        Text("\(currentIndex + 1) / \(urls.count)")
+                            .foregroundStyle(.white)
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+struct MediaFullScreenView: View {
+    let url: String
+    
+    private var isVideo: Bool {
+        url.isVideoURL
+    }
+    
+    var body: some View {
+        ZStack {
+            if isVideo {
+                // 视频播放器
+                VideoPlayerView(urlString: url)
+            } else {
+                // 图片查看器
+                AsyncImage(url: URL(string: url)) { phase in
+                    switch phase {
+                    case .empty:
+                        ProgressView()
+                            .tint(.white)
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                            .clipped()
+                    case .failure:
+                        VStack {
+                            Image(systemName: "photo.badge.exclamationmark")
+                                .font(.largeTitle)
+                                .foregroundStyle(.secondary)
+                            Text("加载失败")
+                                .foregroundStyle(.secondary)
+                        }
+                    @unknown default:
+                        EmptyView()
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct VideoPlayerView: View {
+    let urlString: String
+    
+    var body: some View {
+        // 简单的视频播放器占位符
+        // 在实际应用中，你可以使用 AVPlayerViewController 或其他视频播放器
+        VStack {
+            AsyncImage(url: URL(string: urlString)) { phase in
+                switch phase {
+                case .empty:
+                    ProgressView()
+                        .tint(.white)
+                case .success(let image):
+                    ZStack {
+                        image
+                            .resizable()
+                            .scaledToFit()
+                        
+                        // 播放按钮覆盖层
+                        Button {
+                            // 实际播放逻辑
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.black.opacity(0.6))
+                                    .frame(width: 80, height: 80)
+                                
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 30, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                    }
+                case .failure:
+                    VStack {
+                        Image(systemName: "video.badge.exclamationmark")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text("视频加载失败")
+                            .foregroundStyle(.secondary)
+                    }
+                @unknown default:
+                    EmptyView()
+                }
+            }
+        }
+    }
+}
+

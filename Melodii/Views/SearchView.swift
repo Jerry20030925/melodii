@@ -9,7 +9,7 @@ import SwiftUI
 
 struct SearchView: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
 
     @State private var searchText = ""
     @State private var searchResults: [User] = []
@@ -193,7 +193,7 @@ struct SearchView: View {
 
         do {
             // 搜索用户
-            searchResults = try await supabaseService.searchUsers(keyword: searchText, limit: 50)
+            searchResults = try await supabaseService.searchUsers(query: searchText, limit: 50)
 
             // 添加到搜索历史
             if !searchHistory.contains(searchText) {
@@ -228,7 +228,7 @@ struct SearchView: View {
 struct UserSearchResultCard: View {
     let user: User
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
 
     @State private var isFollowing = false
 

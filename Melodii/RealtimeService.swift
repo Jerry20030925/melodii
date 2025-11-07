@@ -8,6 +8,7 @@
 import Foundation
 import Supabase
 import Combine
+import UserNotifications
 
 @MainActor
 final class RealtimeService: ObservableObject {
@@ -129,6 +130,11 @@ final class RealtimeService: ObservableObject {
                     // 只处理与当前用户相关（收件人或发件人）
                     if message.receiverId == userId || message.senderId == userId {
                         onInsert(message)
+
+                        // 如果是收到的消息（非自己发送），通过PushNotificationManager处理推送通知
+                        if message.receiverId == userId && message.senderId != userId {
+                            await self.handleIncomingMessage(message)
+                        }
                     }
                 } catch {
                     print("⚠️ decode message insert failed: \(error)")
@@ -140,6 +146,25 @@ final class RealtimeService: ObservableObject {
             try await channel.subscribeWithError()
         } catch {
             print("❌ subscribe messages failed: \(error)")
+        }
+    }
+
+    /// 处理收到的消息通知
+    private func handleIncomingMessage(_ message: Message) async {
+        // 获取发送者信息
+        do {
+            let sender = try await SupabaseService.shared.fetchUserProfile(id: message.senderId)
+            
+            // 使用新的PushNotificationManager处理通知
+            await PushNotificationManager.shared.handleNewMessage(message, from: sender)
+            
+            print("✅ 已通过PushNotificationManager处理新消息通知")
+        } catch {
+            print("❌ 获取发送者信息失败: \(error)")
+            
+            // 创建临时用户对象作为备选方案
+            let fallbackSender = User(id: message.senderId, nickname: "某人")
+            await PushNotificationManager.shared.handleNewMessage(message, from: fallbackSender)
         }
     }
 
@@ -161,6 +186,7 @@ final class RealtimeService: ObservableObject {
         let channel = client.realtimeV2.channel("conversation:\(conversationId)")
         conversationChannels[conversationId] = channel
 
+        // INSERT: 新消息
         Task {
             for await change in channel.postgresChange(InsertAction.self, schema: "public", table: "messages") {
                 do {
@@ -170,6 +196,20 @@ final class RealtimeService: ObservableObject {
                     }
                 } catch {
                     print("⚠️ decode conversation message insert failed: \(error)")
+                }
+            }
+        }
+
+        // UPDATE: 消息状态更新（用于已读、编辑等实时同步）
+        Task {
+            for await change in channel.postgresChange(UpdateAction.self, schema: "public", table: "messages") {
+                do {
+                    let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
+                    if message.conversationId == conversationId {
+                        onInsert(message)
+                    }
+                } catch {
+                    print("⚠️ decode conversation message update failed: \(error)")
                 }
             }
         }

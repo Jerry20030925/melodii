@@ -11,7 +11,7 @@ import PhotosUI
 
 struct ChatView: View {
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
     @ObservedObject private var realtimeMessaging = RealtimeMessagingService.shared
 
     let conversationId: String
@@ -340,13 +340,14 @@ struct ChatView: View {
 
         do {
             if let data = try await item.loadTransferable(type: Data.self) {
-                let urlString = try await supabaseService.uploadChatMedia(
+                let urlString = try await supabaseService.uploadPostMediaWithProgress(
                     data: data,
                     mime: "image/jpeg",
                     fileName: nil,
                     folder: "conversations/\(conversationId)/images",
                     bucket: "media",
-                    isPublic: true
+                    isPublic: true,
+                    onProgress: { _ in }
                 )
                 try await sendMediaMessage(urlString: urlString, type: .image)
             } else {
@@ -388,13 +389,9 @@ struct ChatView: View {
 
         do {
             let data = try Data(contentsOf: recorder.url)
-            let urlString = try await supabaseService.uploadChatMedia(
+            let urlString = try await supabaseService.uploadVoiceMessage(
                 data: data,
-                mime: "audio/m4a",
-                fileName: nil,
-                folder: "conversations/\(conversationId)/voices",
-                bucket: "media",
-                isPublic: true
+                userId: authService.currentUser?.id ?? ""
             )
             try await sendMediaMessage(urlString: urlString, type: .voice)
         } catch {
@@ -411,9 +408,8 @@ struct ChatView: View {
         let message = try await supabaseService.sendMessage(
             conversationId: conversationId,
             senderId: uid,
-            receiverId: otherUserId,  // 直接使用传入的otherUserId
             content: urlString,
-            messageType: type
+            type: type.rawValue
         )
         // Convert server Message -> EnhancedMessage before appending for consistency
         let enhanced = EnhancedMessage(
@@ -449,6 +445,9 @@ private struct EnhancedMessageBubble: View {
     let isMine: Bool
 
     @State private var audioPlayer: AVAudioPlayer?
+    @ObservedObject private var audioRecorder = AudioRecorder.shared
+    @State private var isPlaying = false
+    @State private var resolvedDuration: TimeInterval?
 
     var body: some View {
         HStack {
@@ -598,31 +597,38 @@ private struct EnhancedMessageBubble: View {
                 Button {
                     Task { await togglePlay() }
                 } label: {
-                    Image(systemName: audioPlayer?.isPlaying == true ? "pause.circle.fill" : "play.circle.fill")
+                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
                         .font(.title2)
                         .foregroundStyle(isMine ? .white : .blue)
                 }
-                
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text("语音消息")
                         .font(.subheadline)
                         .fontWeight(.medium)
-                    
-                    // 语音波形效果
-                    HStack(spacing: 2) {
-                        ForEach(0..<8, id: \.self) { _ in
-                            RoundedRectangle(cornerRadius: 1)
-                                .fill(isMine ? Color.white.opacity(0.7) : Color.blue.opacity(0.7))
-                                .frame(width: 3, height: CGFloat.random(in: 8...20))
+
+                    HStack(spacing: 6) {
+                        // 语音波形效果
+                        HStack(spacing: 2) {
+                            ForEach(0..<8, id: \.self) { _ in
+                                RoundedRectangle(cornerRadius: 1)
+                                    .fill(isMine ? Color.white.opacity(0.7) : Color.blue.opacity(0.7))
+                                    .frame(width: 3, height: CGFloat.random(in: 8...20))
+                            }
                         }
+                        Text(AudioRecorder.shared.formatTime(resolvedDuration ?? 0))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(isMine ? .white.opacity(0.85) : .secondary)
                     }
                 }
-                
+
                 Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(minWidth: 150)
+            .task { await resolveDurationIfNeeded() }
 
         case .system:
             Text(message.content)
@@ -631,23 +637,93 @@ private struct EnhancedMessageBubble: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+        case .video:
+            // Minimal placeholder view to satisfy ViewBuilder and avoid build error
+            HStack(spacing: 8) {
+                Image(systemName: "video")
+                    .font(.title3)
+                    .foregroundStyle(isMine ? .white : .blue)
+                Text("视频消息")
+                    .font(.subheadline)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .frame(maxWidth: 250, minHeight: 120, alignment: .center)
+            .background(isMine ? Color.white.opacity(0.15) : Color(.systemGray6))
+        case .sticker:
+            // Simple sticker rendering: load as image URL; if not a URL, show placeholder
+            if let url = URL(string: message.content) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .empty:
+                        HStack {
+                            ProgressView().scaleEffect(0.8)
+                            Text("贴纸加载中...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(16)
+                        .frame(width: 140, height: 140)
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 160, maxHeight: 160)
+                            .padding(8)
+                    case .failure:
+                        VStack(spacing: 6) {
+                            Image(systemName: "face.smiling.inverse")
+                                .font(.title2)
+                                .foregroundStyle(.secondary)
+                            Text("贴纸加载失败")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(16)
+                    @unknown default:
+                        EmptyView()
+                    }
+                }
+            } else {
+                VStack(spacing: 6) {
+                    Image(systemName: "face.smiling.inverse")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    Text("贴纸")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(16)
+            }
         }
     }
 
     private func togglePlay() async {
         guard let url = URL(string: message.content) else { return }
-        
-        if let player = audioPlayer, player.isPlaying {
-            player.stop()
-            audioPlayer = nil
+
+        if isPlaying {
+            audioRecorder.stopPlaying()
+            isPlaying = false
         } else {
             do {
-                let data = try Data(contentsOf: url)
-                audioPlayer = try AVAudioPlayer(data: data)
-                audioPlayer?.play()
+                if url.isFileURL {
+                    try await audioRecorder.playAudio(url: url)
+                } else {
+                    try await audioRecorder.playRemoteAudio(url: url)
+                }
+                isPlaying = true
             } catch {
                 print("播放语音失败: \(error)")
             }
+        }
+    }
+
+    private func resolveDurationIfNeeded() async {
+        guard resolvedDuration == nil, let url = URL(string: message.content) else { return }
+        if url.isFileURL {
+            resolvedDuration = AudioRecorder.shared.getAudioDuration(url: url)
+        } else {
+            resolvedDuration = await AudioRecorder.shared.getRemoteAudioDuration(url: url)
         }
     }
 }

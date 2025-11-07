@@ -81,6 +81,24 @@ struct RootView: View {
         .onReceive(authService.objectWillChange) { _ in
             if authService.isAuthenticated {
                 isCheckingAuth = false
+                
+                // 启动实时服务连接
+                if let userId = authService.currentUser?.id {
+                    Task {
+                        await RealtimeService.shared.connect(userId: userId)
+                        // 同时启动全局消息监听
+                        await RealtimeService.shared.subscribeToMessages(userId: userId) { message in
+                            print("🔔 收到全局消息: \(message.content)")
+                        }
+                        print("✅ RealtimeService 已连接，用户ID: \(userId)")
+                    }
+                }
+            } else {
+                // 用户登出时断开连接
+                Task {
+                    await RealtimeService.shared.disconnect()
+                    print("🔌 RealtimeService 已断开连接")
+                }
             }
         }
     }

@@ -7,9 +7,11 @@
 
 import SwiftUI
 import CoreMotion
+import Supabase
+import PostgREST
 
 struct ShakeDiscoveryView: View {
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
     @ObservedObject private var authService = AuthService.shared
 
     @State private var discoveredUser: User?
@@ -205,12 +207,15 @@ struct ShakeDiscoveryView: View {
 
         do {
             // 获取随机推荐用户
-            let posts = try await supabaseService.fetchTrendingPosts(limit: 10, offset: 0)
+            let posts = try await supabaseService.fetchTrendingPosts(limit: 10)
             let users = posts.map { $0.author }.filter { $0.id != authService.currentUser?.id }
 
             if let randomUser = users.randomElement() {
                 discoveredUser = randomUser
                 showResult = true
+
+                // 保存摇一摇发现记录
+                await saveShakeDiscoveryRecord(discoveredUser: randomUser)
 
                 // 成功反馈
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -220,6 +225,31 @@ struct ShakeDiscoveryView: View {
         }
 
         isShaking = false
+    }
+    
+    // MARK: - Data Persistence
+    
+    private func saveShakeDiscoveryRecord(discoveredUser: User) async {
+        guard let currentUserId = authService.currentUser?.id else { return }
+        
+        do {
+            // 创建摇一摇发现记录
+            let record = [
+                "user_id": currentUserId,
+                "discovered_user_id": discoveredUser.id,
+                "discovery_type": "shake",
+                "created_at": ISO8601DateFormatter().string(from: Date())
+            ]
+            
+            try await supabaseService.client
+                .from("user_discoveries")
+                .insert(record)
+                .execute()
+            
+            print("✅ 摇一摇发现记录已保存")
+        } catch {
+            print("❌ 保存摇一摇发现记录失败: \(error)")
+        }
     }
 }
 

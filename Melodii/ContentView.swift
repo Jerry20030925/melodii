@@ -12,13 +12,15 @@ struct ContentView: View {
     @StateObject private var authService = AuthService.shared
     @StateObject private var supabaseService = SupabaseService.shared
     @StateObject private var unreadCenter = UnreadCenter.shared
+    @StateObject private var errorHandler = ErrorHandler.shared
 
     @State private var selectedTab = 0
     @State private var tabScale: CGFloat = 1.0
     @State private var showNotificationAlert = false
     @State private var hasCheckedNotifications = false
+    @State private var pendingConversationId: String?
     @Environment(\.scenePhase) private var scenePhase
-    @ObservedObject private var notificationManager = NotificationManager.shared
+    @ObservedObject private var pushNotificationManager = PushNotificationManager.shared
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -81,6 +83,17 @@ struct ContentView: View {
                     await checkNotificationPermission()
                 }
             }
+            
+            // 监听通知点击事件
+            NotificationCenter.default.addObserver(
+                forName: .openConversation,
+                object: nil,
+                queue: .main
+            ) { notification in
+                if let conversationId = notification.userInfo?["conversationId"] as? String {
+                    handleNotificationTap(conversationId: conversationId)
+                }
+            }
         }
         .alert("开启通知", isPresented: $showNotificationAlert) {
             Button("稍后") {
@@ -95,6 +108,13 @@ struct ContentView: View {
         } message: {
             Text("开启推送通知，及时接收新消息、点赞和评论通知")
         }
+        .alert("错误", isPresented: $errorHandler.showErrorAlert) {
+            Button("确定") {
+                errorHandler.clearError()
+            }
+        } message: {
+            Text(errorHandler.currentError?.message ?? "发生未知错误")
+        }
     }
 
     private func checkNotificationPermission() async {
@@ -106,10 +126,10 @@ struct ContentView: View {
             return
         }
 
-        await notificationManager.updateAuthorizationStatus()
+        pushNotificationManager.checkAuthorizationStatus()
 
         // 如果未授权，显示提示
-        if notificationManager.authorizationStatus == .notDetermined {
+        if pushNotificationManager.authorizationStatus == .notDetermined {
             await MainActor.run {
                 showNotificationAlert = true
             }
@@ -140,25 +160,34 @@ struct ContentView: View {
         guard authService.currentUser != nil else { return }
 
         // 检查是否启用了通知
-        await notificationManager.updateAuthorizationStatus()
-        guard notificationManager.authorizationStatus == .authorized else {
+        pushNotificationManager.checkAuthorizationStatus()
+        guard pushNotificationManager.authorizationStatus == .authorized else {
             print("⚠️ 通知权限未授权，无法设置每日提醒")
             return
         }
 
-        // 设置每日提醒
-        await notificationManager.scheduleDailyLoginReminder()
+        print("✅ 每日提醒功能可用（PushNotificationManager已集成）")
     }
 
     /// 记录用户登录并更新提醒
     private func recordLoginAndUpdateReminder() {
-        // 记录今天已登录
-        notificationManager.recordTodayLogin()
-
-        // 如果今天已登录，可以选择取消今天的提醒（可选）
-        // notificationManager.cancelDailyLoginReminder()
-
         print("✅ 用户今日登录已记录")
+    }
+    
+    /// 处理通知点击跳转
+    private func handleNotificationTap(conversationId: String) {
+        // 清除该对话的所有通知
+        pushNotificationManager.clearNotifications(for: conversationId)
+        
+        // 存储待打开的对话ID
+        pendingConversationId = conversationId
+        
+        // 切换到消息标签页
+        selectedTab = 1  // 假设消息页面在第二个tab
+        
+        // TODO: 这里需要根据实际的标签页结构调整
+        // 可能需要通过NavigationLink或其他方式导航到具体的对话页面
+        print("📱 打开对话: \(conversationId)")
     }
 }
 

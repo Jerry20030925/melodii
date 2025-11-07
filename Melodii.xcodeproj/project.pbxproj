@@ -24,6 +24,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				MainTabView.swift,
 			);
 			target = C409DE452EB3106200936E2A /* Melodii */;
 		};
@@ -80,9 +81,9 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = C409DE542EB3106300936E2A /* Build configuration list for PBXNativeTarget "Melodii" */;
 			buildPhases = (
-				C409DE422EB3106200936E2A /* Sources */,
 				C409DE432EB3106200936E2A /* Frameworks */,
 				C409DE442EB3106200936E2A /* Resources */,
+				C4D71FBC2EBC98020001280C /* Sources */,
 			);
 			buildRules = (
 			);
@@ -153,7 +154,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		C409DE422EB3106200936E2A /* Sources */ = {
+		C4D71FBC2EBC98020001280C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (

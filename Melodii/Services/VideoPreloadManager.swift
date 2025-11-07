@@ -38,37 +38,41 @@ class VideoPreloadManager: ObservableObject {
         let task = Task {
             let item = AVPlayerItem(url: videoURL)
 
-            // 等待视频准备就绪
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                var observer: NSKeyValueObservation?
-                var hasResumed = false
+            do {
+                // 等待视频准备就绪
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    var observer: NSKeyValueObservation?
+                    var hasResumed = false
 
-                observer = item.observe(\.status, options: [.new]) { item, _ in
-                    guard !hasResumed else { return }
+                    observer = item.observe(\.status, options: [.new]) { item, _ in
+                        guard !hasResumed else { return }
 
-                    if item.status == .readyToPlay || item.status == .failed {
+                        if item.status == .readyToPlay || item.status == .failed {
+                            hasResumed = true
+                            observer?.invalidate()
+                            if item.status == .readyToPlay {
+                                continuation.resume()
+                            } else {
+                                continuation.resume(throwing: NSError(domain: "VideoPreloadError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Video failed to load"]))
+                            }
+                        }
+                    }
+
+                    // 设置超时
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                        guard !hasResumed else { return }
                         hasResumed = true
                         observer?.invalidate()
-                        continuation.resume()
+                        continuation.resume(throwing: NSError(domain: "VideoPreloadError", code: -2, userInfo: [NSLocalizedDescriptionKey: "Video preload timeout"]))
                     }
                 }
 
-                // 设置超时
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-                    guard !hasResumed else { return }
-                    hasResumed = true
-                    observer?.invalidate()
-                    continuation.resume()
-                }
-            }
-
-            if item.status == .readyToPlay {
                 await MainActor.run {
                     preloadedItems[url] = item
                 }
                 print("✅ 视频预加载成功: \(url)")
-            } else {
-                print("❌ 视频预加载失败: \(url)")
+            } catch {
+                print("❌ 视频预加载失败: \(url), 错误: \(error.localizedDescription)")
             }
 
             await MainActor.run {

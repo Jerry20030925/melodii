@@ -10,7 +10,7 @@ import Combine
 
 struct ConversationsView: View {
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
     @ObservedObject private var unreadCenter = UnreadCenter.shared
     @ObservedObject private var realtimeService = RealtimeService.shared
 

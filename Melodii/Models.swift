@@ -203,7 +203,7 @@ final class Post: Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, authorId = "author_id", text, mediaURLs = "media_urls", topics
+        case id, authorId = "author_id", author, text, mediaURLs = "media_urls", topics
         case moodTags = "mood_tags", city, isAnonymous = "is_anonymous"
         case likeCount = "like_count", commentCount = "comment_count"
         case collectCount = "collect_count", status
@@ -229,14 +229,20 @@ final class Post: Codable {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
 
-        // author需要单独加载
-        author = User(id: decodedAuthorId, nickname: "Loading...")
+        // Try to decode the nested author object from the join
+        if let authorData = try? container.decode(User.self, forKey: .author) {
+            author = authorData
+        } else {
+            // Fallback to placeholder if author data is not available
+            author = User(id: decodedAuthorId, nickname: "Loading...")
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(authorId, forKey: .authorId)
+        try container.encode(author, forKey: .author)
         try container.encodeIfPresent(text, forKey: .text)
         try container.encode(mediaURLs, forKey: .mediaURLs)
         try container.encode(topics, forKey: .topics)
@@ -247,6 +253,68 @@ final class Post: Codable {
         try container.encode(commentCount, forKey: .commentCount)
         try container.encode(collectCount, forKey: .collectCount)
         try container.encode(status, forKey: .status)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+}
+
+// MARK: - Moment Model
+@Model
+final class Moment: Codable {
+    @Attribute(.unique) var id: String
+    var authorId: String
+    @Relationship var author: User
+    var mediaURL: String
+    var caption: String?
+    var createdAt: Date
+    var updatedAt: Date
+
+    init(id: String = UUID().uuidString,
+         author: User,
+         mediaURL: String,
+         caption: String? = nil,
+         createdAt: Date = Date(),
+         updatedAt: Date = Date()) {
+        self.id = id
+        self.authorId = author.id
+        self.author = author
+        self.mediaURL = mediaURL
+        self.caption = caption
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, authorId = "author_id", author
+        case mediaURL = "media_url", caption
+        case createdAt = "created_at", updatedAt = "updated_at"
+    }
+
+    required init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedAuthorId = try container.decode(String.self, forKey: .authorId)
+
+        id = try container.decode(String.self, forKey: .id)
+        authorId = decodedAuthorId
+        mediaURL = try container.decode(String.self, forKey: .mediaURL)
+        caption = try container.decodeIfPresent(String.self, forKey: .caption)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+
+        if let authorData = try? container.decode(User.self, forKey: .author) {
+            author = authorData
+        } else {
+            author = User(id: decodedAuthorId, nickname: "Loading...")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(authorId, forKey: .authorId)
+        try container.encode(author, forKey: .author)
+        try container.encode(mediaURL, forKey: .mediaURL)
+        try container.encodeIfPresent(caption, forKey: .caption)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
     }
@@ -455,23 +523,95 @@ struct Message: Codable, Identifiable {
     let isRead: Bool
     let createdAt: Date
     let updatedAt: Date
+    
+    // 语音消息扩展属性（可选，用于本地存储）
+    var voiceDuration: TimeInterval?
 
     enum CodingKeys: String, CodingKey {
         case id
         case conversationId = "conversation_id"
         case senderId = "sender_id"
         case receiverId = "receiver_id"
+        case sender
         case content
         case messageType = "message_type"
         case isRead = "is_read"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        conversationId = try container.decode(String.self, forKey: .conversationId)
+        let decodedSenderId = try container.decode(String.self, forKey: .senderId)
+        senderId = decodedSenderId
+        receiverId = try container.decode(String.self, forKey: .receiverId)
+        content = try container.decode(String.self, forKey: .content)
+        messageType = try container.decode(MessageType.self, forKey: .messageType)
+        isRead = try container.decode(Bool.self, forKey: .isRead)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        
+        // Try to decode the nested sender object from the join
+        if let senderData = try? container.decode(User.self, forKey: .sender) {
+            sender = senderData
+        } else {
+            // Fallback to placeholder if sender data is not available
+            sender = User(id: decodedSenderId, nickname: "Loading...")
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(conversationId, forKey: .conversationId)
+        try container.encode(senderId, forKey: .senderId)
+        try container.encode(receiverId, forKey: .receiverId)
+        try container.encodeIfPresent(sender, forKey: .sender)
+        try container.encode(content, forKey: .content)
+        try container.encode(messageType, forKey: .messageType)
+        try container.encode(isRead, forKey: .isRead)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+    
+    // Manual initializer for local/optimistic messages
+    init(id: String, conversationId: String, senderId: String, receiverId: String, sender: User? = nil, content: String, messageType: MessageType, isRead: Bool, createdAt: Date, updatedAt: Date) {
+        self.id = id
+        self.conversationId = conversationId
+        self.senderId = senderId
+        self.receiverId = receiverId
+        self.sender = sender
+        self.content = content
+        self.messageType = messageType
+        self.isRead = isRead
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
 }
 
 enum MessageType: String, Codable {
     case text = "text"           // 文字消息
     case image = "image"         // 图片消息
+    case video = "video"         // 视频消息
     case voice = "voice"         // 语音消息
+    case sticker = "sticker"     // 贴纸消息
     case system = "system"       // 系统消息
+}
+
+// MARK: - ProfileVisit Model (主页访问记录)
+struct ProfileVisit: Codable, Identifiable {
+    let id: String
+    let profileOwnerId: String  // 主页所有者ID
+    let visitorId: String       // 访问者ID
+    var visitor: User?          // 访问者信息
+    let visitedAt: Date         // 访问时间
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case profileOwnerId = "profile_owner_id"
+        case visitorId = "visitor_id"
+        case visitedAt = "visited_at"
+    }
 }

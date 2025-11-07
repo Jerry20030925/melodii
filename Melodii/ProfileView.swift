@@ -266,6 +266,14 @@ struct ProfileView: View {
             Divider().padding(.leading, 52)
 
             NavigationLink {
+                ProfileVisitorsView(userId: user.id)
+            } label: {
+                ProfileRowView(icon: "person.2.fill", title: "谁看过我")
+            }
+
+            Divider().padding(.leading, 52)
+
+            NavigationLink {
                 CollectionsView()
             } label: {
                 ProfileRowView(icon: "bookmark", title: "我的收藏")
@@ -439,6 +447,13 @@ private struct UserPostsListView: View {
     private func deletePost(_ post: Post) async {
         do {
             try await supabaseService.deletePost(id: post.id)
+            
+            NotificationCenter.default.post(
+                name: .postDeleted,
+                object: nil,
+                userInfo: ["postId": post.id]
+            )
+            
             posts.removeAll { $0.id == post.id }
         } catch {
             errorMessage = "删除失败: \(error.localizedDescription)"
@@ -615,20 +630,59 @@ private struct CollectionPostCard: View {
         VStack(alignment: .leading, spacing: 12) {
             // 作者信息
             HStack(spacing: 12) {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [.purple.opacity(0.6), .pink.opacity(0.6)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 40, height: 40)
-                    .overlay(
-                        Text(post.author.initials)
-                            .font(.subheadline)
-                            .foregroundStyle(.white)
-                    )
+                Group {
+                    if let avatarURL = post.author.avatarURL, !avatarURL.isEmpty, let url = URL(string: avatarURL) {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .empty:
+                                Circle()
+                                    .fill(Color(.systemGray5))
+                                    .frame(width: 40, height: 40)
+                                    .overlay(ProgressView().scaleEffect(0.6))
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 40, height: 40)
+                                    .clipShape(Circle())
+                            case .failure:
+                                Circle()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.purple.opacity(0.6), .pink.opacity(0.6)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 40, height: 40)
+                                    .overlay(
+                                        Text(post.author.initials)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.white)
+                                    )
+                            @unknown default:
+                                Circle()
+                                    .fill(Color(.systemGray5))
+                                    .frame(width: 40, height: 40)
+                            }
+                        }
+                    } else {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.purple.opacity(0.6), .pink.opacity(0.6)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 40, height: 40)
+                            .overlay(
+                                Text(post.author.initials)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.white)
+                            )
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(post.author.nickname)
@@ -802,6 +856,13 @@ private struct DraftsView: View {
     private func deleteDraft(_ post: Post) async {
         do {
             try await supabaseService.deletePost(id: post.id)
+            
+            NotificationCenter.default.post(
+                name: .postDeleted,
+                object: nil,
+                userInfo: ["postId": post.id]
+            )
+            
             drafts.removeAll { $0.id == post.id }
         } catch {
             errorMessage = "删除失败：\(error.localizedDescription)"

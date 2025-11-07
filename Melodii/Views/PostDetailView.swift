@@ -132,8 +132,8 @@ struct PostDetailView: View {
 
                         Spacer()
 
-                        // 关注按钮
-                        if let userId = authService.currentUser?.id, userId != post.author.id {
+                        // 关注按钮（匿名作者不允许关注）
+                        if !post.isAnonymous, let userId = authService.currentUser?.id, userId != post.author.id {
                             Button {
                                 Task { await toggleFollow() }
                             } label: {
@@ -190,13 +190,19 @@ struct PostDetailView: View {
                         }
                     }
 
-                    // 交互按钮
+                    // 交互按钮（显示数量）
                     HStack(spacing: 24) {
                         Button {
                             Task { await toggleLike() }
                         } label: {
-                            Image(systemName: isLiked ? "heart.fill" : "heart")
-                                .foregroundStyle(isLiked ? .red : .primary)
+                            HStack(spacing: 6) {
+                                Image(systemName: isLiked ? "heart.fill" : "heart")
+                                    .foregroundStyle(isLiked ? .red : .primary)
+                                Text(String(likeCount))
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(isLiked ? .red : .secondary)
+                            }
                         }
                         .buttonStyle(.plain)
                         .disabled(isTogglingLike)
@@ -204,16 +210,30 @@ struct PostDetailView: View {
                         Button {
                             isCommentFieldFocused = true
                         } label: {
-                            Image(systemName: "text.bubble")
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: 6) {
+                                Image(systemName: "text.bubble")
+                                    .foregroundStyle(.secondary)
+                                Text(String(commentCount))
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .buttonStyle(.plain)
 
                         Button {
                             Task { await toggleCollect() }
                         } label: {
-                            Image(systemName: isCollected ? "bookmark.fill" : "bookmark")
-                                .foregroundStyle(isCollected ? .blue : .primary)
+                            HStack(spacing: 6) {
+                                Image(systemName: isCollected ? "bookmark.fill" : "bookmark")
+                                    .foregroundStyle(isCollected ? .blue : .primary)
+                                if collectCount > 0 {
+                                    Text(String(collectCount))
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                        .foregroundStyle(isCollected ? .blue : .secondary)
+                                }
+                            }
                         }
                         .buttonStyle(.plain)
                         .disabled(isTogglingCollect)
@@ -433,7 +453,7 @@ struct PostDetailView: View {
                 .background(.ultraThinMaterial)
             }
         }
-        .task {
+        .task(id: "\(post.id)|\(scrollToCommentId ?? "")") {
             await loadData()
             if let target = scrollToCommentId, !target.isEmpty {
                 pendingScrollTarget = target
@@ -503,7 +523,7 @@ struct PostDetailView: View {
             } else {
                 try await supabaseService.unlikePost(userId: userId, postId: post.id)
                 await MainActor.run {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                 }
             }
         } catch {
@@ -539,7 +559,7 @@ struct PostDetailView: View {
             } else {
                 try await supabaseService.uncollectPost(userId: userId, postId: post.id)
                 await MainActor.run {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                 }
             }
         } catch {
@@ -668,7 +688,7 @@ struct PostDetailView: View {
                     reportedUserId: comment.authorId,
                     postId: post.id,
                     commentId: comment.id,
-                    reason: nil
+                    reason: nil as String?
                 )
                 await MainActor.run {
                     alertMessage = "已举报该评论，我们会尽快处理"
@@ -964,4 +984,3 @@ private extension PostDetailView {
         }
     }
 }
-

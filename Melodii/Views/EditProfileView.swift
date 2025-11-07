@@ -15,7 +15,7 @@ struct EditProfileView: View {
     @Environment(\.dismiss) private var dismiss
 
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
     @ObservedObject private var storageService = StorageService.shared
 
     @State private var nickname: String
@@ -381,23 +381,19 @@ struct EditProfileView: View {
             var coverURL: String? = nil
 
             if let avatarImage, let data = avatarImage.jpegData(compressionQuality: 0.9) {
-                avatarURL = try await supabaseService.uploadChatMedia(
+                avatarURL = try await supabaseService.uploadUserMedia(
                     data: data,
-                    mime: "image/jpeg",
-                    fileName: "avatar_\(user.id).jpg",
-                    folder: "avatars/\(user.id)",
-                    bucket: "media",
+                    userId: user.id,
+                    fileName: "avatar.jpg",
                     isPublic: true
                 )
             }
 
             if let coverImage, let data = coverImage.jpegData(compressionQuality: 0.9) {
-                coverURL = try await supabaseService.uploadChatMedia(
+                coverURL = try await supabaseService.uploadUserMedia(
                     data: data,
-                    mime: "image/jpeg",
-                    fileName: "cover_\(user.id).jpg",
-                    folder: "covers/\(user.id)",
-                    bucket: "media",
+                    userId: user.id,
+                    fileName: "cover.jpg",
                     isPublic: true
                 )
             }
@@ -419,7 +415,7 @@ struct EditProfileView: View {
                     return
                 }
                 
-                try await supabaseService.updateUserMID(
+                try await supabaseService.updateUserMusicID(
                     userId: user.id,
                     newMID: mid
                 )

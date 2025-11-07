@@ -31,7 +31,7 @@ final class LocationService: NSObject, ObservableObject {
 
     private var originalAccuracy: CLLocationAccuracy = kCLLocationAccuracyHundredMeters
     private var boosted: Bool = false
-    private var locationTimeout: Task<Void, Never>?
+    private var locationTimeout: Task<Void, Error>?
 
     // 缓存最后的位置，避免频繁请求
     private var lastLocation: CLLocation?

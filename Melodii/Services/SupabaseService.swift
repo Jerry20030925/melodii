@@ -2,880 +2,229 @@
 //  SupabaseService.swift
 //  Melodii
 //
-//  Created by Claude Code on 30/10/2025.
+//  Core database service for Supabase operations
 //
 
 import Foundation
 import Supabase
 import Combine
+import AVFoundation
 
-// MARK: - Top-level DTOs to avoid @MainActor isolation
-
-private struct UsersPatch: Encodable, Sendable {
-    let nickname: String?
-    let bio: String?
-    let avatar_url: String?
-    let cover_image_url: String?
-    let updated_at: String
-}
-
-private struct UsersMIDPatch: Encodable, Sendable {
-    let mid: String
-    let last_mid_update: String
-    let updated_at: String
-}
-
-private struct UsersOnboardingPatch: Encodable, Sendable {
-    let birthday: Date
-    let interests: [String]
-    let is_onboarding_completed: Bool
-    let updated_at: String
-}
-
-private struct FollowInsert: Encodable, Sendable {
-    let follower_id: String
-    let following_id: String
-}
-
-// Explicitly nonisolated to satisfy Encodable & Sendable in generic context
-nonisolated private struct MintUserMIDParams: Encodable, Sendable { let uid: String }
-// Explicitly nonisolated to satisfy Decodable & Sendable in generic context
-nonisolated private struct MintUserMIDRow: Decodable, Sendable { let mint_mid_for_user: String? }
-
-private struct PostStatusPatch: Encodable, Sendable {
-    let status: String
-    let updated_at: String
-}
-
-private struct CollectionInsert: Encodable, Sendable { let user_id: String; let post_id: String }
-private struct LikeInsert: Encodable, Sendable { let user_id: String; let post_id: String }
-
-private struct CollectionsRow: Decodable, Sendable { let post_id: String }
-private struct LikesRowId: Decodable, Sendable { let id: String }
-private struct GenericIdRow: Decodable, Sendable { let id: String }
-private struct FollowingRow: Decodable, Sendable { let following_id: String }
-
-private struct CommentInsert: Encodable, Sendable {
-    let post_id: String
-    let author_id: String
-    let text: String
-    let reply_to_id: String?
-    let created_at: String
-    let updated_at: String
-}
- 
- private struct ReportInsert: Encodable, Sendable {
-     let reporter_id: String
-     let reported_user_id: String?
-     let post_id: String?
-     let comment_id: String?
-     let reason: String?
-     let created_at: String
- }
-
-private struct PostInsert: Encodable, Sendable {
-    let id: String
-    let author_id: String
-    let text: String?
-    let media_urls: [String]
-    let topics: [String]
-    let mood_tags: [String]
-    let city: String?
-    let is_anonymous: Bool
-    let like_count: Int
-    let comment_count: Int
-    let collect_count: Int
-    let status: String
-    let created_at: String
-    let updated_at: String
-}
-
-private struct PostFullPatch: Encodable, Sendable {
-    let text: String?
-    let topics: [String]
-    let mood_tags: [String]
-    let city: String?
-    let is_anonymous: Bool
-    let media_urls: [String]
-    let status: String
-    let updated_at: String
-}
-
-private struct ConversationInsert: Encodable, Sendable {
-    let id: String
-    let participant1_id: String
-    let participant2_id: String
-    let last_message_at: String
-    let created_at: String
-    let updated_at: String
-}
-
-private struct ConversationUpdate: Encodable, Sendable { let last_message_at: String }
-
-private struct MessageInsert: Encodable, Sendable {
-    let conversation_id: String
-    let sender_id: String
-    let receiver_id: String
-    let content: String
-    let message_type: String
-    let is_read: Bool
-    let created_at: String
-    let updated_at: String
-}
-
-private struct MessageReadUpdate: Encodable, Sendable {
-    let is_read: Bool
-    let updated_at: String
-}
-
-private struct NotificationReadUpdate: Encodable, Sendable {
-    let is_read: Bool
-    let updated_at: String
-}
-
+@MainActor
 class SupabaseService: ObservableObject {
     static let shared = SupabaseService()
-    private let client = SupabaseConfig.client
-
-    // 用户信息缓存
-    private var userCache: [String: (user: User, timestamp: Date)] = [:]
-    private let userCacheExpiration: TimeInterval = 300 // 5分钟缓存
-
-    private init() {}
-
-    // MARK: - Users
-
-    /// 获取指定 ID 的用户（带缓存）
-    func fetchUser(id: String) async throws -> User {
-        // 检查缓存
-        if let cached = userCache[id] {
-            let age = Date().timeIntervalSince(cached.timestamp)
-            if age < userCacheExpiration {
-                print("✅ 从缓存获取用户信息: \(id)")
-                return cached.user
-            } else {
-                // 缓存过期，移除
-                userCache.removeValue(forKey: id)
+    
+    let client = SupabaseConfig.client
+    
+    // 网络重试配置
+    private let maxRetryAttempts = 3
+    private let baseRetryDelay: TimeInterval = 1.0
+    
+    // 缓存配置
+    private var userCache: [String: User] = [:]
+    private var conversationCache: [String: Conversation] = [:]
+    private let cacheExpiration: TimeInterval = 300 // 5分钟
+    private var cacheTimestamps: [String: Date] = [:]
+    
+    // 批量操作队列
+    private let batchQueue = DispatchQueue(label: "com.melodii.batch", qos: .utility)
+    private var pendingOperations: [String: Any] = [:]
+    
+    private init() {
+        setupCacheCleanup()
+    }
+    
+    // MARK: - Cache Management
+    
+    /// 设置缓存清理定时器
+    private func setupCacheCleanup() {
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.cleanupExpiredCache()
             }
         }
+    }
+    
+    /// 清理过期缓存
+    private func cleanupExpiredCache() {
+        let now = Date()
+        let expiredKeys = cacheTimestamps.compactMap { key, timestamp in
+            now.timeIntervalSince(timestamp) > cacheExpiration ? key : nil
+        }
+        
+        for key in expiredKeys {
+            if key.hasPrefix("user_") {
+                userCache.removeValue(forKey: String(key.dropFirst(5)))
+            } else if key.hasPrefix("conversation_") {
+                conversationCache.removeValue(forKey: String(key.dropFirst(13)))
+            }
+            cacheTimestamps.removeValue(forKey: key)
+        }
+        
+        if !expiredKeys.isEmpty {
+            print("🧹 清理了 \(expiredKeys.count) 个过期缓存项")
+        }
+    }
+    
+    /// 缓存用户数据
+    private func cacheUser(_ user: User) {
+        userCache[user.id] = user
+        cacheTimestamps["user_\(user.id)"] = Date()
+    }
+    
+    /// 从缓存获取用户
+    private func getCachedUser(_ userId: String) -> User? {
+        guard let timestamp = cacheTimestamps["user_\(userId)"],
+              Date().timeIntervalSince(timestamp) < cacheExpiration else {
+            return nil
+        }
+        return userCache[userId]
+    }
+    
+    // MARK: - Network Helper Methods
+    
+    /// 执行带重试的网络请求
+    private func executeWithRetry<T>(
+        operation: @escaping () async throws -> T,
+        operationName: String = "网络请求"
+    ) async throws -> T {
+        var lastError: Error?
+        
+        for attempt in 1...maxRetryAttempts {
+            do {
+                let result = try await operation()
+                if attempt > 1 {
+                    print("✅ \(operationName) 重试成功 (第 \(attempt) 次)")
+                }
+                return result
+            } catch {
+                lastError = error
+                print("❌ \(operationName) 失败 (第 \(attempt) 次): \(error.localizedDescription)")
+                
+                // 如果不是最后一次尝试，等待后重试
+                if attempt < maxRetryAttempts {
+                    let delay = baseRetryDelay * pow(2.0, Double(attempt - 1))
+                    print("⏳ \(Int(delay))秒后重试...")
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+            }
+        }
+        
+        throw lastError ?? NSError(
+            domain: "SupabaseService",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "\(operationName)失败，已重试\(maxRetryAttempts)次"]
+        )
+    }
+    
+    // MARK: - User Operations
 
-        // 从网络获取
-        let user: User = try await client
-            .from("users")
-            .select()
-            .eq("id", value: id)
-            .single()
-            .execute()
-            .value
-
-        // 保存到缓存
-        userCache[id] = (user, Date())
-        print("✅ 从网络获取并缓存用户信息: \(id)")
-
-        return user
+    func fetchUser(id: String) async throws -> User {
+        // 先检查缓存
+        if let cachedUser = getCachedUser(id) {
+            return cachedUser
+        }
+        
+        return try await executeWithRetry(operationName: "获取用户信息") {
+            let user: User = try await self.client
+                .from("users")
+                .select()
+                .eq("id", value: id)
+                .single()
+                .execute()
+                .value
+            
+            // 缓存用户数据
+            self.cacheUser(user)
+            return user
+        }
     }
 
-    /// 清除用户缓存
-    func clearUserCache() {
-        userCache.removeAll()
-        print("✅ 已清除用户缓存")
-    }
-
-    /// 清除特定用户的缓存
-    func clearUserCache(userId: String) {
-        userCache.removeValue(forKey: userId)
-        print("✅ 已清除用户 \(userId) 的缓存")
-    }
-
-    /// 按昵称或 MID 搜索用户
-    func searchUsers(keyword: String, limit: Int = 50) async throws -> [User] {
-        let kw = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !kw.isEmpty else { return [] }
-
-        let users: [User] = try await client
-            .from("users")
-            .select()
-            .or("nickname.ilike.%\(kw)%,mid.ilike.%\(kw)%")
-            .order("updated_at", ascending: false)
-            .limit(limit)
-            .execute()
-            .value
-
-        return users
-    }
-
-    /// 更新用户资料（任意字段可选）
+    /// 更新用户基础信息（昵称、简介、头像、封面、兴趣）
     func updateUser(
         id: String,
-        nickname: String?,
-        bio: String?,
-        avatarURL: String?,
-        coverURL: String?,
+        nickname: String? = nil,
+        bio: String? = nil,
+        avatarURL: String? = nil,
+        coverURL: String? = nil,
         interests: [String]? = nil
     ) async throws {
-        let payload = UsersPatch(
-            nickname: nickname,
-            bio: bio,
-            avatar_url: avatarURL,
-            cover_image_url: coverURL,
-            updated_at: ISO8601DateFormatter().string(from: Date())
-        )
+        struct UserUpdate: Encodable {
+            let nickname: String?
+            let bio: String?
+            let avatar_url: String?
+            let cover_url: String?
+            let interests: [String]?
+            
+            init(nickname: String? = nil, bio: String? = nil, avatarURL: String? = nil, coverURL: String? = nil, interests: [String]? = nil) {
+                self.nickname = nickname
+                self.bio = bio
+                self.avatar_url = avatarURL
+                self.cover_url = coverURL
+                self.interests = interests
+            }
+        }
+        
+        let payload = UserUpdate(nickname: nickname, bio: bio, avatarURL: avatarURL, coverURL: coverURL, interests: interests)
 
-        _ = try await client
+        try await client
             .from("users")
             .update(payload)
             .eq("id", value: id)
             .execute()
-
-        // 如果提供了interests，单独更新（因为UsersPatch可能不包含此字段）
-        if let interests = interests {
-            struct InterestsUpdate: Encodable {
-                let interests: [String]
-                let updated_at: String
-            }
-            let interestsPayload = InterestsUpdate(
-                interests: interests,
-                updated_at: ISO8601DateFormatter().string(from: Date())
-            )
-
-            _ = try await client
-                .from("users")
-                .update(interestsPayload)
-                .eq("id", value: id)
-                .execute()
-        }
+        
+        // 失效缓存，避免旧数据
+        userCache.removeValue(forKey: id)
+        cacheTimestamps.removeValue(forKey: "user_\(id)")
     }
 
-    /// 更新用户MID
-    func updateUserMID(userId: String, newMID: String) async throws {
-        // 验证MID格式
-        let validationResult = MIDValidationResult(input: newMID)
-        guard validationResult.isValid else {
-            throw NSError(domain: "MIDValidation", code: 400, userInfo: [
-                NSLocalizedDescriptionKey: validationResult.errorMessage ?? "MID格式无效"
-            ])
+    /// 完成用户的引导信息并写入（生日、兴趣、完成标记）
+    func updateUserOnboardingInfo(userId: String, birthday: String?, interests: [String]?) async throws {
+        struct OnboardingUpdate: Encodable {
+            let is_onboarding_completed: Bool
+            let birthday: String?
+            let interests: [String]?
         }
+        
+        let payload = OnboardingUpdate(is_onboarding_completed: true, birthday: birthday, interests: interests)
 
-        // 检查MID是否已被使用
-        let existingUsers: [User] = try await client
-            .from("users")
-            .select("id")
-            .eq("mid", value: newMID)
-            .neq("id", value: userId)
-            .execute()
-            .value
-
-        if !existingUsers.isEmpty {
-            throw NSError(domain: "MIDValidation", code: 409, userInfo: [
-                NSLocalizedDescriptionKey: "该MID已被其他用户使用"
-            ])
-        }
-
-        let now = Date()
-
-        // 尝试使用包含 last_mid_update 的payload
-        do {
-            let payload = UsersMIDPatch(
-                mid: newMID,
-                last_mid_update: ISO8601DateFormatter().string(from: now),
-                updated_at: ISO8601DateFormatter().string(from: now)
-            )
-
-            _ = try await client
-                .from("users")
-                .update(payload)
-                .eq("id", value: userId)
-                .execute()
-        } catch {
-            // 如果失败（可能是因为 last_mid_update 列不存在），尝试只更新 mid 字段
-            print("⚠️ 使用完整payload失败，尝试简化版本: \(error)")
-
-            struct SimpleMIDPatch: Encodable, Sendable {
-                let mid: String
-                let updated_at: String
-            }
-
-            let simplePayload = SimpleMIDPatch(
-                mid: newMID,
-                updated_at: ISO8601DateFormatter().string(from: now)
-            )
-
-            _ = try await client
-                .from("users")
-                .update(simplePayload)
-                .eq("id", value: userId)
-                .execute()
-        }
-    }
-    func updateUserOnboarding(
-        userId: String,
-        birthday: Date,
-        interests: [String]
-    ) async throws {
-        let payload = UsersOnboardingPatch(
-            birthday: birthday,
-            interests: interests,
-            is_onboarding_completed: true,
-            updated_at: ISO8601DateFormatter().string(from: Date())
-        )
-
-        _ = try await client
+        try await client
             .from("users")
             .update(payload)
             .eq("id", value: userId)
             .execute()
+
+        userCache.removeValue(forKey: userId)
+        cacheTimestamps.removeValue(forKey: "user_\(userId)")
     }
 
-    /// 是否已关注
-    func isFollowing(followerId: String, followingId: String) async throws -> Bool {
-        // 仅查询 id 字段，用轻量结构解码，避免字段缺失导致解码失败
-        let rows: [GenericIdRow] = try await client
-            .from("follows")
-            .select("id")
-            .eq("follower_id", value: followerId)
-            .eq("following_id", value: followingId)
-            .limit(1)
-            .execute()
-            .value
-
-        return !rows.isEmpty
-    }
-
-    /// 关注用户（若已存在则忽略）
-    func followUser(followerId: String, followingId: String) async throws {
-        // 先检查是否已经关注
-        let alreadyFollowing = try await isFollowing(followerId: followerId, followingId: followingId)
-        if alreadyFollowing {
-            print("✅ 已经关注过此用户，跳过")
-            return
-        }
-
-        do {
-            // 插入关注记录
-            _ = try await client
-                .from("follows")
-                .insert(FollowInsert(follower_id: followerId, following_id: followingId))
-                .execute()
-
-            print("✅ 关注记录插入成功")
-
-            // 更新关注者的 following_count
-            try await incrementUserFollowingCount(userId: followerId, delta: 1)
-            print("✅ 更新关注者following_count成功")
-
-            // 更新被关注者的 followers_count
-            try await incrementUserFollowersCount(userId: followingId, delta: 1)
-            print("✅ 更新被关注者followers_count成功")
-        } catch {
-            print("❌ 关注失败: \(error)")
-            let errStr = String(describing: error).lowercased()
-            if errStr.contains("duplicate") || errStr.contains("unique") {
-                print("⚠️ Duplicate错误，忽略")
-                return
-            }
-            throw error
-        }
-    }
-
-    /// 取消关注
-    func unfollowUser(followerId: String, followingId: String) async throws {
-        // 先检查是否真的在关注
-        let isCurrentlyFollowing = try await isFollowing(followerId: followerId, followingId: followingId)
-        if !isCurrentlyFollowing {
-            print("✅ 本来就没有关注此用户，跳过")
-            return
-        }
-
-        do {
-            // 删除关注记录
-            _ = try await client
-                .from("follows")
-                .delete()
-                .eq("follower_id", value: followerId)
-                .eq("following_id", value: followingId)
-                .execute()
-
-            print("✅ 取消关注记录删除成功")
-
-            // 更新关注者的 following_count
-            try await incrementUserFollowingCount(userId: followerId, delta: -1)
-            print("✅ 更新关注者following_count成功")
-
-            // 更新被关注者的 followers_count
-            try await incrementUserFollowersCount(userId: followingId, delta: -1)
-            print("✅ 更新被关注者followers_count成功")
-        } catch {
-            print("❌ 取消关注失败: \(error)")
-            throw error
-        }
-    }
-
-    /// 增加/减少用户的关注数
-    private func incrementUserFollowingCount(userId: String, delta: Int) async throws {
-        // 获取当前用户数据
-        let user: User = try await client
+    /// 更新用户的 MID 字段
+    func updateUserMusicID(userId: String, newMID: String) async throws {
+        try await client
             .from("users")
-            .select("following_count")
-            .eq("id", value: userId)
-            .single()
-            .execute()
-            .value
-
-        let newCount = max(0, (user.followingCount ?? 0) + delta)
-
-        struct FollowingCountUpdate: Encodable, Sendable {
-            let following_count: Int
-            let updated_at: String
-        }
-
-        _ = try await client
-            .from("users")
-            .update(FollowingCountUpdate(
-                following_count: newCount,
-                updated_at: ISO8601DateFormatter().string(from: Date())
-            ))
+            .update(["mid": newMID])
             .eq("id", value: userId)
             .execute()
+
+        userCache.removeValue(forKey: userId)
+        cacheTimestamps.removeValue(forKey: "user_\(userId)")
     }
-
-    /// 增加/减少用户的粉丝数
-    private func incrementUserFollowersCount(userId: String, delta: Int) async throws {
-        // 获取当前用户数据
-        let user: User = try await client
-            .from("users")
-            .select("followers_count")
-            .eq("id", value: userId)
-            .single()
-            .execute()
-            .value
-
-        let newCount = max(0, (user.followersCount ?? 0) + delta)
-
-        struct FollowersCountUpdate: Encodable, Sendable {
-            let followers_count: Int
-            let updated_at: String
+    
+    // MARK: - Post Operations
+    
+    func createPost(authorId: String, text: String?, mediaURLs: [String], topics: [String], moodTags: [String], city: String?, isAnonymous: Bool) async throws -> Post {
+        struct PostInsert: Encodable {
+            let author_id: String
+            let text: String?
+            let media_urls: [String]
+            let topics: [String]
+            let mood_tags: [String]
+            let city: String?
+            let is_anonymous: Bool
+            let status: String
         }
-
-        _ = try await client
-            .from("users")
-            .update(FollowersCountUpdate(
-                followers_count: newCount,
-                updated_at: ISO8601DateFormatter().string(from: Date())
-            ))
-            .eq("id", value: userId)
-            .execute()
-    }
-
-    // MARK: - MID RPC
-
-    /// 调用后端 RPC，快速为指定用户生成/补发 MID，返回生成后的 mid 字符串
-    func mintUserMID(userId: String) async throws -> String {
-        // 优先用 select single 值（不同 Supabase SDK 版本返回结构可能不同）
-        do {
-            let response: PostgrestResponse<MintUserMIDRow> = try await client
-                .rpc("mint_mid_for_user", params: MintUserMIDParams(uid: userId))
-                .execute()
-            if let value = response.value.mint_mid_for_user, !value.isEmpty {
-                return value
-            }
-        } catch {
-            // 某些版本 .value 直接是 String
-            if let s = try? await client
-                .rpc("mint_mid_for_user", params: MintUserMIDParams(uid: userId))
-                .execute()
-                .value as? String, !s.isEmpty {
-                return s
-            }
-            throw error
-        }
-
-        // 再读一次用户，确保拿到 mid
-        let user = try await fetchUser(id: userId)
-        if let mid = user.mid, !mid.isEmpty {
-            return mid
-        }
-        throw NSError(domain: "SupabaseService", code: -7, userInfo: [NSLocalizedDescriptionKey: "RPC 未返回 MID"])
-    }
-
-    // MARK: - Posts
-
-    /// 批量加载帖子的作者信息
-    private func populateAuthors(for posts: [Post]) async throws -> [Post] {
-        guard !posts.isEmpty else { return posts }
-
-        // 收集所有唯一的作者ID
-        let authorIds = Array(Set(posts.map { $0.authorId }))
-
-        // 批量获取作者信息
-        let authors: [User] = try await client
-            .from("users")
-            .select()
-            .in("id", values: authorIds)
-            .execute()
-            .value
-
-        // 创建作者ID到作者对象的映射
-        let authorMap = Dictionary(uniqueKeysWithValues: authors.map { ($0.id, $0) })
-
-        // 填充每个帖子的作者信息
-        var updatedPosts = posts
-        for i in 0..<updatedPosts.count {
-            if let author = authorMap[updatedPosts[i].authorId] {
-                updatedPosts[i].author = author
-            }
-        }
-
-        return updatedPosts
-    }
-
-    /// 获取单个帖子
-    func fetchPost(id: String) async throws -> Post {
-        var post: Post = try await client
-            .from("posts")
-            .select()
-            .eq("id", value: id)
-            .single()
-            .execute()
-            .value
-
-        // 加载作者信息
-        let author = try await fetchUser(id: post.authorId)
-        post.author = author
-
-        return post
-    }
-
-    /// 获取用户的已发布帖子（按时间倒序）
-    func fetchUserPosts(userId: String) async throws -> [Post] {
-        let posts: [Post] = try await client
-            .from("posts")
-            .select()
-            .eq("author_id", value: userId)
-            .eq("status", value: PostStatus.published.rawValue)
-            .order("created_at", ascending: false)
-            .execute()
-            .value
-        return try await populateAuthors(for: posts)
-    }
-
-    /// 删除帖子（标记为 deleted 或直接删除）
-    func deletePost(id: String) async throws {
-        _ = try await client
-            .from("posts")
-            .delete()
-            .eq("id", value: id)
-            .execute()
-    }
-
-    /// 隐藏帖子（此处用设置为 deleted 代替，因为模型没有 hidden）
-    func hidePost(id: String) async throws {
-        let payload = PostStatusPatch(status: PostStatus.deleted.rawValue, updated_at: ISO8601DateFormatter().string(from: Date()))
-        _ = try await client
-            .from("posts")
-            .update(payload)
-            .eq("id", value: id)
-            .execute()
-    }
-
-    /// 获取草稿
-    func fetchDraftPosts(userId: String) async throws -> [Post] {
-        let posts: [Post] = try await client
-            .from("posts")
-            .select()
-            .eq("author_id", value: userId)
-            .eq("status", value: PostStatus.draft.rawValue)
-            .order("created_at", ascending: false)
-            .execute()
-            .value
-        return try await populateAuthors(for: posts)
-    }
-
-    /// 草稿发布（将 status 置为 published）
-    func publishPost(id: String) async throws {
-        let payload = PostStatusPatch(status: PostStatus.published.rawValue, updated_at: ISO8601DateFormatter().string(from: Date()))
-        _ = try await client
-            .from("posts")
-            .update(payload)
-            .eq("id", value: id)
-            .execute()
-    }
-
-    /// 推荐流：展示所有已发布的内容（包含自己），按时间倒序
-    func fetchRecommendedPosts(userId: String, limit: Int, offset: Int) async throws -> [Post] {
-        let posts: [Post] = try await client
-            .from("posts")
-            .select()
-            .eq("status", value: PostStatus.published.rawValue)
-            .order("created_at", ascending: false)
-            .range(from: offset, to: offset + max(0, limit - 1))
-            .execute()
-            .value
-        return try await populateAuthors(for: posts)
-    }
-
-    /// 热门流（示例：按 like_count 降序）
-    func fetchTrendingPosts(limit: Int, offset: Int) async throws -> [Post] {
-        let posts: [Post] = try await client
-            .from("posts")
-            .select()
-            .eq("status", value: PostStatus.published.rawValue)
-            .order("like_count", ascending: false)
-            .order("created_at", ascending: false)
-            .range(from: offset, to: offset + max(0, limit - 1))
-            .execute()
-            .value
-        return try await populateAuthors(for: posts)
-    }
-
-    /// 关注流（取我关注的人发布的帖子）
-    func fetchFollowingPosts(userId: String, limit: Int, offset: Int) async throws -> [Post] {
-        let following: [FollowingRow] = try await client
-            .from("follows")
-            .select("following_id")
-            .eq("follower_id", value: userId)
-            .execute()
-            .value
-        let ids = following.map { $0.following_id }
-        if ids.isEmpty { return [] }
-
-        let posts: [Post] = try await client
-            .from("posts")
-            .select()
-            .in("author_id", values: ids)
-            .eq("status", value: PostStatus.published.rawValue)
-            .order("created_at", ascending: false)
-            .range(from: offset, to: offset + max(0, limit - 1))
-            .execute()
-            .value
-        return try await populateAuthors(for: posts)
-    }
-
-    /// 搜索帖子（按文本、话题匹配；示例实现）
-    func searchPosts(keyword: String, limit: Int, offset: Int) async throws -> [Post] {
-        let kw = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !kw.isEmpty else { return [] }
-
-        let posts: [Post] = try await client
-            .from("posts")
-            .select()
-            .eq("status", value: PostStatus.published.rawValue)
-            .or("text.ilike.%\(kw)%,topics.ilike.%\(kw)%")
-            .order("created_at", ascending: false)
-            .range(from: offset, to: offset + max(0, limit - 1))
-            .execute()
-            .value
-        return try await populateAuthors(for: posts)
-    }
-
-    // MARK: - Likes
-
-    func hasLikedPost(userId: String, postId: String) async throws -> Bool {
-        let rows: [LikesRowId] = try await client
-            .from("likes")
-            .select("id")
-            .eq("user_id", value: userId)
-            .eq("post_id", value: postId)
-            .limit(1)
-            .execute()
-            .value
-        return !rows.isEmpty
-    }
-
-    func likePost(userId: String, postId: String) async throws {
-        do {
-            _ = try await client
-                .from("likes")
-                .insert(LikeInsert(user_id: userId, post_id: postId))
-                .execute()
-        } catch {
-            let s = String(describing: error).lowercased()
-            if s.contains("duplicate") || s.contains("unique") { return }
-            throw error
-        }
-        _ = try? await client
-            .rpc("increment_post_like_count", params: ["post_id": postId])
-            .execute()
-    }
-
-    func unlikePost(userId: String, postId: String) async throws {
-        _ = try await client
-            .from("likes")
-            .delete()
-            .eq("user_id", value: userId)
-            .eq("post_id", value: postId)
-            .execute()
-        _ = try? await client
-            .rpc("decrement_post_collect_count", params: ["post_id": postId])
-            .execute()
-    }
-
-    // MARK: - Collections
-
-    func hasCollectedPost(userId: String, postId: String) async throws -> Bool {
-        let rows: [GenericIdRow] = try await client
-            .from("collections")
-            .select("id")
-            .eq("user_id", value: userId)
-            .eq("post_id", value: postId)
-            .limit(1)
-            .execute()
-            .value
-        return !rows.isEmpty
-    }
-
-    func collectPost(userId: String, postId: String) async throws {
-        do {
-            _ = try await client
-                .from("collections")
-                .insert(CollectionInsert(user_id: userId, post_id: postId))
-                .execute()
-        } catch {
-            let s = String(describing: error).lowercased()
-            if s.contains("duplicate") || s.contains("unique") { return }
-            throw error
-        }
-        _ = try? await client
-            .rpc("increment_post_collect_count", params: ["post_id": postId])
-            .execute()
-    }
-
-    func uncollectPost(userId: String, postId: String) async throws {
-        _ = try await client
-            .from("collections")
-            .delete()
-            .eq("user_id", value: userId)
-            .eq("post_id", value: postId)
-            .execute()
-        _ = try? await client
-            .rpc("decrement_post_collect_count", params: ["post_id": postId])
-            .execute()
-    }
-
-    /// 获取用户收藏的帖子（简单做法：先查集合，再 in 取帖子）
-    func fetchUserCollections(userId: String) async throws -> [Post] {
-        let rows: [CollectionsRow] = try await client
-            .from("collections")
-            .select("post_id")
-            .eq("user_id", value: userId)
-            .order("created_at", ascending: false)
-            .execute()
-            .value
-        let ids = rows.map { $0.post_id }
-        if ids.isEmpty { return [] }
-
-        let posts: [Post] = try await client
-            .from("posts")
-            .select()
-            .in("id", values: ids)
-            .execute()
-            .value
-        return posts
-    }
-
-    // MARK: - Comments
-
-    /// 批量加载评论的作者信息
-    private func populateAuthorsForComments(for comments: [Comment]) async throws -> [Comment] {
-        guard !comments.isEmpty else { return comments }
-
-        // 收集所有唯一的作者ID
-        let authorIds = Array(Set(comments.map { $0.authorId }))
-
-        // 批量获取作者信息
-        let authors: [User] = try await client
-            .from("users")
-            .select()
-            .in("id", values: authorIds)
-            .execute()
-            .value
-
-        // 创建作者ID到作者对象的映射
-        let authorMap = Dictionary(uniqueKeysWithValues: authors.map { ($0.id, $0) })
-
-        // 填充每个评论的作者信息
-        var updatedComments = comments
-        for i in 0..<updatedComments.count {
-            if let author = authorMap[updatedComments[i].authorId] {
-                updatedComments[i].author = author
-            }
-        }
-
-        return updatedComments
-    }
-
-    func fetchComments(postId: String) async throws -> [Comment] {
-        let comments: [Comment] = try await client
-            .from("comments")
-            .select()
-            .eq("post_id", value: postId)
-            .order("created_at", ascending: false)
-            .execute()
-            .value
-        return try await populateAuthorsForComments(for: comments)
-    }
-
-    func createComment(postId: String, authorId: String, text: String, replyToId: String?) async throws -> Comment {
-        let now = ISO8601DateFormatter().string(from: Date())
-        let payload = CommentInsert(post_id: postId, author_id: authorId, text: text, reply_to_id: replyToId, created_at: now, updated_at: now)
-
-        var inserted: Comment = try await client
-            .from("comments")
-            .insert(payload)
-            .select()
-            .single()
-            .execute()
-            .value
-
-        // 加载作者信息
-        let author = try await fetchUser(id: authorId)
-        inserted.author = author
-
-        return inserted
-    }
- 
-     /// 删除评论（仅作者可删），并减少帖子评论计数
-     func deleteComment(id: String, postId: String) async throws {
-         _ = try await client
-             .from("comments")
-             .delete()
-             .eq("id", value: id)
-             .execute()
-         _ = try? await client
-             .rpc("decrement_post_comment_count", params: ["post_id": postId])
-             .execute()
-     }
- 
-     /// 举报评论（写入 reports 表）
-     func reportComment(reporterId: String, reportedUserId: String?, postId: String?, commentId: String?, reason: String?) async throws {
-         let payload = ReportInsert(
-             reporter_id: reporterId,
-             reported_user_id: reportedUserId,
-             post_id: postId,
-             comment_id: commentId,
-             reason: reason,
-             created_at: ISO8601DateFormatter().string(from: Date())
-         )
-         _ = try await client
-             .from("reports")
-             .insert(payload)
-             .execute()
-     }
-
-    // MARK: - Posts Create/Update (CreateView)
-
-    func createPost(
-        authorId: String,
-        text: String?,
-        mediaURLs: [String],
-        topics: [String],
-        moodTags: [String],
-        city: String?,
-        isAnonymous: Bool
-    ) async throws -> Post {
-        let now = ISO8601DateFormatter().string(from: Date())
-        let id = UUID().uuidString
-        let payload = PostInsert(
-            id: id,
+        
+        let insertData = PostInsert(
             author_id: authorId,
             text: text,
             media_urls: mediaURLs,
@@ -883,54 +232,519 @@ class SupabaseService: ObservableObject {
             mood_tags: moodTags,
             city: city,
             is_anonymous: isAnonymous,
-            like_count: 0,
-            comment_count: 0,
-            collect_count: 0,
-            status: PostStatus.published.rawValue,
-            created_at: now,
-            updated_at: now
+            status: "published"
         )
-
+        
         let post: Post = try await client
             .from("posts")
-            .insert(payload)
+            .insert(insertData)
             .select()
             .single()
             .execute()
             .value
+        
         return post
     }
-
-    func updatePostFull(
-        id: String,
-        text: String?,
-        topics: [String],
-        moodTags: [String],
-        city: String?,
-        isAnonymous: Bool,
-        mediaURLs: [String],
-        status: PostStatus
-    ) async throws {
-        let payload = PostFullPatch(
+    
+    func updatePostFull(id: String, text: String?, topics: [String], moodTags: [String], city: String?, isAnonymous: Bool, mediaURLs: [String], status: PostStatus) async throws {
+        struct PostUpdate: Encodable {
+            let text: String?
+            let topics: [String]
+            let mood_tags: [String]
+            let city: String?
+            let is_anonymous: Bool
+            let media_urls: [String]
+            let status: String
+            let updated_at: Date
+        }
+        
+        let updateData = PostUpdate(
             text: text,
             topics: topics,
             mood_tags: moodTags,
             city: city,
-            is_anonymous: isAnonymous, // fixed key name
+            is_anonymous: isAnonymous,
             media_urls: mediaURLs,
             status: status.rawValue,
-            updated_at: ISO8601DateFormatter().string(from: Date())
+            updated_at: Date()
         )
-
-        _ = try await client
+        
+        try await client
             .from("posts")
-            .update(payload)
+            .update(updateData)
+            .eq("id", value: id)
+            .execute()
+    }
+    
+    func fetchPosts(limit: Int = 20, offset: Int = 0) async throws -> [Post] {
+        let to = max(offset + limit - 1, offset)
+        let posts: [Post] = try await client
+            .from("posts")
+            .select("""
+                *,
+                author:users!author_id(*)
+            """)
+            .eq("status", value: "published")
+            .order("created_at", ascending: false)
+            .range(from: offset, to: to)
+            .execute()
+            .value
+        
+        return posts
+    }
+
+    /// 获取指定用户的发布内容
+    func fetchUserPosts(userId: String, limit: Int = 20, offset: Int = 0) async throws -> [Post] {
+        let to = max(offset + limit - 1, offset)
+        let posts: [Post] = try await client
+            .from("posts")
+            .select("""
+                *,
+                author:users!author_id(*)
+            """)
+            .eq("author_id", value: userId)
+            .eq("status", value: "published")
+            .order("created_at", ascending: false)
+            .range(from: offset, to: to)
+            .execute()
+            .value
+        return posts
+    }
+
+    /// 删除帖子
+    func deletePost(id: String) async throws {
+        try await client
+            .from("posts")
+            .delete()
             .eq("id", value: id)
             .execute()
     }
 
-    // MARK: - Notifications
+    /// 隐藏帖子（软删除）
+    func hidePost(id: String) async throws {
+        try await client
+            .from("posts")
+            .update(["status": "hidden"]) 
+            .eq("id", value: id)
+            .execute()
+    }
+    
+    // MARK: - Media Upload
+    
+    func uploadPostMediaWithProgress(data: Data, mime: String, fileName: String?, folder: String, bucket: String, isPublic: Bool, onProgress: @escaping (Double) -> Void) async throws -> String {
+        let fileName = fileName ?? UUID().uuidString
+        let path = "\(folder)/\(fileName)"
+        
+        // Simulate progress for now
+        onProgress(0.5)
+        
+        let response = try await client.storage
+            .from(bucket)
+            .upload(path: path, file: data)
+        
+        onProgress(1.0)
+        
+        if isPublic {
+            let publicURL = try client.storage
+                .from(bucket)
+                .getPublicURL(path: path)
+            return publicURL.absoluteString
+        } else {
+            return path
+        }
+    }
+    
+    // MARK: - Interaction Operations
+    
+    func likePost(userId: String, postId: String) async throws {
+        struct LikeInsert: Encodable {
+            let user_id: String
+            let post_id: String
+        }
+        
+        let insertData = LikeInsert(user_id: userId, post_id: postId)
+        
+        try await client
+            .from("post_likes")
+            .insert(insertData)
+            .execute()
+    }
+    
+    func unlikePost(userId: String, postId: String) async throws {
+        try await client
+            .from("post_likes")
+            .delete()
+            .eq("user_id", value: userId)
+            .eq("post_id", value: postId)
+            .execute()
+    }
+    
+    func hasLikedPost(userId: String, postId: String) async throws -> Bool {
+        struct LikeRecord: Decodable {
+            let id: String
+        }
+        
+        let result: [LikeRecord] = try await client
+            .from("post_likes")
+            .select("id")
+            .eq("user_id", value: userId)
+            .eq("post_id", value: postId)
+            .limit(1)
+            .execute()
+            .value
+        
+        return !result.isEmpty
+    }
 
+    /// 关注用户
+    func followUser(followerId: String, followingId: String) async throws {
+        struct Insert: Encodable { let follower_id: String; let following_id: String }
+        let body = Insert(follower_id: followerId, following_id: followingId)
+        try await client
+            .from("follows")
+            .insert(body)
+            .execute()
+    }
+
+    /// 取消关注
+    func unfollowUser(followerId: String, followingId: String) async throws {
+        try await client
+            .from("follows")
+            .delete()
+            .eq("follower_id", value: followerId)
+            .eq("following_id", value: followingId)
+            .execute()
+    }
+
+    /// 是否已关注
+    func isFollowing(followerId: String, followingId: String) async throws -> Bool {
+        struct C: Decodable { let count: Int }
+        let res: [C] = try await client
+            .from("follows")
+            .select("count")
+            .eq("follower_id", value: followerId)
+            .eq("following_id", value: followingId)
+            .execute()
+            .value
+        return res.first?.count ?? 0 > 0
+    }
+
+    /// 记录主页访问
+    func recordUserProfileVisit(profileOwnerId: String, visitorId: String) async throws {
+        struct Visit: Encodable { let profile_owner_id: String; let visitor_id: String }
+        let payload = Visit(profile_owner_id: profileOwnerId, visitor_id: visitorId)
+        try await client
+            .from("profile_visits")
+            .insert(payload)
+            .execute()
+    }
+    
+    func collectPost(userId: String, postId: String) async throws {
+        struct CollectInsert: Encodable {
+            let user_id: String
+            let post_id: String
+        }
+        
+        let insertData = CollectInsert(user_id: userId, post_id: postId)
+        
+        try await client
+            .from("post_collections")
+            .insert(insertData)
+            .execute()
+    }
+    
+    func uncollectPost(userId: String, postId: String) async throws {
+        try await client
+            .from("post_collections")
+            .delete()
+            .eq("user_id", value: userId)
+            .eq("post_id", value: postId)
+            .execute()
+    }
+    
+    func hasCollectedPost(userId: String, postId: String) async throws -> Bool {
+        struct CollectRecord: Decodable {
+            let id: String
+        }
+        
+        let result: [CollectRecord] = try await client
+            .from("post_collections")
+            .select("id")
+            .eq("user_id", value: userId)
+            .eq("post_id", value: postId)
+            .limit(1)
+            .execute()
+            .value
+        
+        return !result.isEmpty
+    }
+    
+    // MARK: - Messaging Operations
+    
+    func getOrCreateConversation(user1Id: String, user2Id: String) async throws -> String {
+        // 1) 先查询是否已存在（两种顺序都查）
+        do {
+            struct Row: Decodable { let id: String }
+            // or() 语法：participant1_id.eq.X,participant2_id.eq.Y OR participant1_id.eq.Y,participant2_id.eq.X
+            let existing: [Row] = try await client
+                .from("conversations")
+                .select("id")
+                .or("and(participant1_id.eq.\(user1Id),participant2_id.eq.\(user2Id)),and(participant1_id.eq.\(user2Id),participant2_id.eq.\(user1Id))")
+                .limit(1)
+                .execute()
+                .value
+
+            if let found = existing.first {
+                return found.id
+            }
+        } catch {
+            // 查询失败不应阻止后续插入，打印后继续
+            print("⚠️ 查询会话失败（将尝试创建）: \(error)")
+        }
+
+        // 2) 不存在则创建（使用确定顺序，避免重复）
+        struct InsertPayload: Encodable {
+            let participant1_id: String
+            let participant2_id: String
+        }
+        let payload = InsertPayload(participant1_id: min(user1Id, user2Id), participant2_id: max(user1Id, user2Id))
+
+        struct Inserted: Decodable { let id: String }
+
+        // 插入可能因并发而冲突（唯一索引建议加在数据库上：unique(participant1_id, participant2_id)）
+        // 这里使用 upsert: false + 捕获冲突后再查一次，保证幂等。
+        do {
+            let inserted: Inserted = try await client
+                .from("conversations")
+                .insert(payload)
+                .select("id")
+                .single()
+                .execute()
+                .value
+            return inserted.id
+        } catch {
+            // 若冲突（已被并发创建），再查一次返回
+            print("ℹ️ 插入会话可能冲突，回退到查询: \(error)")
+            struct Row: Decodable { let id: String }
+            let existing: [Row] = try await client
+                .from("conversations")
+                .select("id")
+                .or("and(participant1_id.eq.\(user1Id),participant2_id.eq.\(user2Id)),and(participant1_id.eq.\(user2Id),participant2_id.eq.\(user1Id))")
+                .limit(1)
+                .execute()
+                .value
+            if let found = existing.first {
+                return found.id
+            }
+            throw error
+        }
+    }
+
+    // 按ID读取会话，并尽量补齐两侧用户（用于进入会话页）
+    func fetchConversation(id: String, currentUserId: String) async throws -> Conversation {
+        var conv: Conversation = try await client
+            .from("conversations")
+            .select()
+            .eq("id", value: id)
+            .single()
+            .execute()
+            .value
+
+        // 尝试补齐 participant1/2（失败不阻塞）
+        async let p1 = (try? fetchUser(id: conv.participant1Id))
+        async let p2 = (try? fetchUser(id: conv.participant2Id))
+
+        let (u1, u2) = await (p1, p2)
+        conv.participant1 = u1
+        conv.participant2 = u2
+
+        // 可选：如果 lastMessage 需要填充，这里可以查询最近一条消息
+        // 但你的模型 lastMessage 是可选，且列表页已有 lastMessageAt，所以可以跳过
+
+        return conv
+    }
+
+    /// 获取用户的会话列表
+    func fetchConversations(userId: String) async throws -> [Conversation] {
+        var conversations: [Conversation] = try await client
+            .from("conversations")
+            .select()
+            .or("participant1_id.eq.\(userId),participant2_id.eq.\(userId)")
+            .order("last_message_at", ascending: false)
+            .execute()
+            .value
+
+        // 并发补齐用户信息（失败不阻塞）
+        try await withThrowingTaskGroup(of: (Int, User?, User?).self) { group in
+            for (index, conv) in conversations.enumerated() {
+                group.addTask { [weak self] in
+                    guard let self else { return (index, nil, nil) }
+                    async let u1 = (try? self.fetchUser(id: conv.participant1Id))
+                    async let u2 = (try? self.fetchUser(id: conv.participant2Id))
+                    return (index, await u1, await u2)
+                }
+            }
+            for try await (index, u1, u2) in group {
+                conversations[index].participant1 = u1
+                conversations[index].participant2 = u2
+            }
+        }
+        return conversations
+    }
+    
+    func sendMessage(conversationId: String, senderId: String, content: String, type: String = "text") async throws -> Message {
+        print("🔍 [DEBUG] sendMessage called with:")
+        print("  - conversationId: \(conversationId)")
+        print("  - senderId: \(senderId)")
+        print("  - content: \(content)")
+        print("  - type: \(type)")
+        
+        struct MessageInsert: Encodable {
+            let conversation_id: String
+            let sender_id: String
+            let receiver_id: String
+            let content: String
+            let message_type: String
+        }
+        
+        do {
+            // Get the other participant's ID from the conversation
+            print("🔍 [DEBUG] Fetching conversation...")
+            
+            // Simple struct to match only what we need from database
+            struct ConversationBasic: Decodable {
+                let participant1_id: String
+                let participant2_id: String
+            }
+            
+            let conversationBasic: ConversationBasic = try await client
+                .from("conversations")
+                .select("participant1_id, participant2_id")
+                .eq("id", value: conversationId)
+                .single()
+                .execute()
+                .value
+            print("🔍 [DEBUG] Conversation found: \(conversationBasic.participant1_id) <-> \(conversationBasic.participant2_id)")
+                
+            let receiverId = conversationBasic.participant1_id == senderId ? conversationBasic.participant2_id : conversationBasic.participant1_id
+            print("🔍 [DEBUG] Receiver ID: \(receiverId)")
+            
+            let insertData = MessageInsert(
+                conversation_id: conversationId,
+                sender_id: senderId,
+                receiver_id: receiverId,
+                content: content,
+                message_type: type
+            )
+            
+            // Insert message without join first to avoid decoding issues
+            struct SimpleMessage: Decodable {
+                let id: String
+                let conversation_id: String
+                let sender_id: String
+                let receiver_id: String
+                let content: String
+                let message_type: String
+                let is_read: Bool
+                let created_at: Date
+                let updated_at: Date
+            }
+            
+            print("🔍 [DEBUG] Inserting message to database...")
+            let simpleMessage: SimpleMessage = try await client
+                .from("messages")
+                .insert(insertData)
+                .select("*")
+                .single()
+                .execute()
+                .value
+            print("🔍 [DEBUG] Message inserted with ID: \(simpleMessage.id)")
+                
+            // Get sender info separately to avoid join issues
+            print("🔍 [DEBUG] Fetching sender info...")
+            let sender = try? await fetchUser(id: senderId)
+            print("🔍 [DEBUG] Sender info: \(sender?.nickname ?? "nil")")
+            
+            // Create Message with manual init
+            let message = Message(
+                id: simpleMessage.id,
+                conversationId: simpleMessage.conversation_id,
+                senderId: simpleMessage.sender_id,
+                receiverId: simpleMessage.receiver_id,
+                sender: sender,
+                content: simpleMessage.content,
+                messageType: MessageType(rawValue: simpleMessage.message_type) ?? .text,
+                isRead: simpleMessage.is_read,
+                createdAt: simpleMessage.created_at,
+                updatedAt: simpleMessage.updated_at
+            )
+            print("🔍 [DEBUG] Message object created successfully")
+                
+            // Update conversation's last message timestamp
+            print("🔍 [DEBUG] Updating conversation timestamp...")
+            try await client
+                .from("conversations")
+                .update(["last_message_at": Date().toISOString()])
+                .eq("id", value: conversationId)
+                .execute()
+            print("🔍 [DEBUG] Conversation timestamp updated")
+                
+            print("✅ [DEBUG] sendMessage completed successfully")
+            return message
+        } catch {
+            print("❌ [DEBUG] sendMessage failed: \(error)")
+            print("❌ [DEBUG] Error details: \(error.localizedDescription)")
+            throw error
+        }
+    }
+    
+    func markMessageAsRead(messageId: String) async throws {
+        try await client
+            .from("messages")
+            .update(["is_read": true])
+            .eq("id", value: messageId)
+            .execute()
+    }
+    
+    func getUnreadMessageCount(userId: String) async throws -> Int {
+        do {
+            struct MessageRecord: Decodable {
+                let id: String
+            }
+            
+            let result: [MessageRecord] = try await client
+                .from("messages")
+                .select("id")
+                .eq("receiver_id", value: userId)
+                .eq("is_read", value: false)
+                .execute()
+                .value
+            
+            return result.count
+        } catch {
+            print("❌ 获取未读消息数失败: \(error)")
+            return 0
+        }
+    }
+    
+    // MARK: - Notification Operations
+    
+    func fetchUnreadNotificationCount(userId: String) async throws -> Int {
+        struct CountResult: Decodable {
+            let count: Int
+        }
+        
+        let result: [CountResult] = try await client
+            .from("notifications")
+            .select("count")
+            .eq("user_id", value: userId)
+            .eq("is_read", value: false)
+            .execute()
+            .value
+        
+        return result.first?.count ?? 0
+    }
+    
     func fetchNotifications(userId: String) async throws -> [Notification] {
         let notifications: [Notification] = try await client
             .from("notifications")
@@ -939,357 +753,544 @@ class SupabaseService: ObservableObject {
             .order("created_at", ascending: false)
             .execute()
             .value
+        
         return notifications
     }
-
-    func markNotificationAsRead(id: String) async throws {
-        let now = ISO8601DateFormatter().string(from: Date())
-        _ = try await client
-            .from("notifications")
-            .update(NotificationReadUpdate(is_read: true, updated_at: now))
-            .eq("id", value: id)
-            .execute()
-    }
-
-    // MARK: - Unread Counts
-
-    func fetchUnreadNotificationCount(userId: String) async throws -> Int {
-        if let response = try? await client
-            .from("notifications")
-            .select("*", head: true, count: .exact)
-            .eq("user_id", value: userId)
-            .eq("is_read", value: false)
-            .execute(),
-           let exact = response.count {
-            return exact
-        }
-
-        let rows: [GenericIdRow] = try await client
-            .from("notifications")
-            .select("id")
-            .eq("user_id", value: userId)
-            .eq("is_read", value: false)
-            .execute()
-            .value
-        return rows.count
-    }
-
-    func getUnreadMessageCount(userId: String) async throws -> Int {
-        if let response = try? await client
-            .from("messages")
-            .select("*", head: true, count: .exact)
-            .eq("receiver_id", value: userId)
-            .eq("is_read", value: false)
-            .execute(),
-           let exact = response.count {
-            return exact
-        }
-
-        let rows: [GenericIdRow] = try await client
-            .from("messages")
-            .select("id")
-            .eq("receiver_id", value: userId)
-            .eq("is_read", value: false)
-            .execute()
-            .value
-        return rows.count
-    }
-
-    // MARK: - Conversations
-
-    func getOrCreateConversation(user1Id: String, user2Id: String) async throws -> String {
-        let p1 = min(user1Id, user2Id)
-        let p2 = max(user1Id, user2Id)
-
-        let exist: [GenericIdRow] = try await client
-            .from("conversations")
-            .select("id")
-            .eq("participant1_id", value: p1)
-            .eq("participant2_id", value: p2)
-            .limit(1)
-            .execute()
-            .value
-        if let first = exist.first { return first.id }
-
-        let now = ISO8601DateFormatter().string(from: Date())
-        let id = UUID().uuidString
-        let payload = ConversationInsert(
-            id: id,
-            participant1_id: p1,
-            participant2_id: p2,
-            last_message_at: now,
-            created_at: now,
-            updated_at: now
-        )
-        _ = try await client
-            .from("conversations")
-            .insert(payload)
-            .execute()
-        return id
-    }
-
-    /// 获取单个会话
-    func fetchConversation(id: String, currentUserId: String) async throws -> Conversation {
-        let conv: Conversation = try await client
-            .from("conversations")
-            .select()
+    
+    func fetchPost(id: String) async throws -> Post {
+        let post: Post = try await client
+            .from("posts")
+            .select("""
+                *,
+                author:users!author_id(*)
+            """)
             .eq("id", value: id)
             .single()
             .execute()
             .value
-        return conv
+        
+        return post
     }
-
-    /// 获取用户的会话列表（已实现）
-    func fetchConversations(userId: String) async throws -> [Conversation] {
-        let rawConversations: [Conversation] = try await client
-            .from("conversations")
+    
+    // MARK: - Custom Stickers
+    
+    func fetchCustomStickers(userId: String) async throws -> [CustomSticker] {
+        let stickers: [CustomSticker] = try await client
+            .from("custom_stickers")
             .select()
-            .or("participant1_id.eq.\(userId),participant2_id.eq.\(userId)")
-            .order("last_message_at", ascending: false)
-            .execute()
-            .value
-
-        if rawConversations.isEmpty { return [] }
-
-        var userIds = Set<String>()
-        for c in rawConversations {
-            userIds.insert(c.participant1Id)
-            userIds.insert(c.participant2Id)
-        }
-
-        let users: [User] = try await client
-            .from("users")
-            .select()
-            .in("id", values: Array(userIds))
-            .execute()
-            .value
-        let userMap = Dictionary(uniqueKeysWithValues: users.map { ($0.id, $0) })
-
-        let convIds = rawConversations.map { $0.id }
-        let allLatestMessages: [Message] = try await client
-            .from("messages")
-            .select()
-            .in("conversation_id", values: convIds)
+            .eq("user_id", value: userId)
             .order("created_at", ascending: false)
             .execute()
             .value
-
-        var lastMessageByConv: [String: Message] = [:]
-        for msg in allLatestMessages {
-            if lastMessageByConv[msg.conversationId] == nil {
-                lastMessageByConv[msg.conversationId] = msg
-            }
-        }
-
-        let enriched: [Conversation] = rawConversations.map { c in
-            var conv = c
-            conv.participant1 = userMap[c.participant1Id]
-            conv.participant2 = userMap[c.participant2Id]
-            conv.lastMessage = lastMessageByConv[c.id]
-            return conv
-        }
-
-        return enriched
+        
+        return stickers
     }
-
-    // MARK: - Messages
-
-    func fetchMessages(conversationId: String, limit: Int, offset: Int) async throws -> [Message] {
-        let messages: [Message] = try await client
-            .from("messages")
-            .select()
-            .eq("conversation_id", value: conversationId)
-            .order("created_at", ascending: true)
-            .range(from: offset, to: offset + max(0, limit - 1))
-            .execute()
-            .value
-        return messages
-    }
-
-    func sendMessage(conversationId: String, senderId: String, receiverId: String, content: String, messageType: MessageType) async throws -> Message {
-        let now = ISO8601DateFormatter().string(from: Date())
-        let payload = MessageInsert(
-            conversation_id: conversationId,
-            sender_id: senderId,
-            receiver_id: receiverId,
-            content: content,
-            message_type: messageType.rawValue,
-            is_read: false,
-            created_at: now,
-            updated_at: now
+    
+    func createCustomSticker(userId: String, imageURL: String, name: String?) async throws -> CustomSticker {
+        struct StickerInsert: Encodable {
+            let user_id: String
+            let image_url: String
+            let name: String?
+        }
+        
+        let insertData = StickerInsert(
+            user_id: userId,
+            image_url: imageURL,
+            name: name
         )
-
-        let inserted: Message = try await client
-            .from("messages")
-            .insert(payload)
+        
+        let sticker: CustomSticker = try await client
+            .from("custom_stickers")
+            .insert(insertData)
             .select()
             .single()
             .execute()
             .value
-
-        _ = try? await client
-            .from("conversations")
-            .update(ConversationUpdate(last_message_at: now))
-            .eq("id", value: conversationId)
+        
+        return sticker
+    }
+    
+    func deleteCustomSticker(stickerId: String) async throws {
+        try await client
+            .from("custom_stickers")
+            .delete()
+            .eq("id", value: stickerId)
             .execute()
-
-        return inserted
+    }
+    
+    func uploadStickerImage(data: Data, userId: String, isPublic: Bool) async throws -> String {
+        let fileName = "\(UUID().uuidString).jpg"
+        let folder = "stickers/\(userId)"
+        
+        return try await uploadPostMediaWithProgress(
+            data: data,
+            mime: "image/jpeg",
+            fileName: fileName,
+            folder: folder,
+            bucket: "media",
+            isPublic: isPublic
+        ) { _ in }
     }
 
-    func markMessageAsRead(messageId: String) async throws {
-        let now = ISO8601DateFormatter().string(from: Date())
-        _ = try await client
+    // MARK: - Compatibility Wrappers (matching existing view call sites)
+
+    /// 兼容旧调用：上传用户媒体（使用默认 bucket: media, public: true）
+    func uploadUserMedia(data: Data, mime: String, fileName: String?, folder: String) async throws -> String {
+        return try await uploadPostMediaWithProgress(
+            data: data,
+            mime: mime,
+            fileName: fileName,
+            folder: folder,
+            bucket: "media",
+            isPublic: true
+        ) { _ in }
+    }
+
+
+    // MARK: - User Media Upload
+    /// 上传用户头像或封面等媒体，返回可用 URL
+    func uploadUserMedia(data: Data, userId: String, fileName: String? = nil, isPublic: Bool = true) async throws -> String {
+        let name = fileName ?? "\(UUID().uuidString).jpg"
+        let folder = "users/\(userId)"
+        return try await uploadPostMediaWithProgress(
+            data: data,
+            mime: "image/jpeg",
+            fileName: name,
+            folder: folder,
+            bucket: "media",
+            isPublic: isPublic,
+            onProgress: { _ in }
+        )
+    }
+
+    
+    // MARK: - Presence Operations
+    
+    func setOnline(userId: String, online: Bool) async throws {
+        struct PresenceUpdate: Encodable {
+            let is_online: Bool
+            let last_seen: String
+        }
+        
+        let payload = PresenceUpdate(is_online: online, last_seen: Date().toISOString())
+        
+        try await client
+            .from("users")
+            .update(payload)
+            .eq("id", value: userId)
+            .execute()
+    }
+    
+    func touchLastSeen(userId: String) async throws {
+        try await client
+            .from("users")
+            .update(["last_seen": Date().toISOString()])
+            .eq("id", value: userId)
+            .execute()
+    }
+    
+    // MARK: - Voice Message Operations
+    
+    func uploadVoiceMessage(data: Data, userId: String) async throws -> String {
+        let fileName = "\(UUID().uuidString).m4a"
+        let folder = "voices/\(userId)"
+        
+        // 优先上传到 audio 存储桶；若失败则回退到 media 存储桶
+        do {
+            return try await uploadPostMediaWithProgress(
+                data: data,
+                mime: "audio/m4a",
+                fileName: fileName,
+                folder: folder,
+                bucket: "audio",
+                isPublic: true
+            ) { _ in }
+        } catch {
+            print("⚠️ 上传到 'audio' 存储桶失败，回退到 'media'：\(error)")
+            return try await uploadPostMediaWithProgress(
+                data: data,
+                mime: "audio/m4a",
+                fileName: fileName,
+                folder: folder,
+                bucket: "media",
+                isPublic: true
+            ) { _ in }
+        }
+    }
+    
+    func getAudioDuration(from url: URL) async -> TimeInterval {
+        do {
+            let asset = AVAsset(url: url)
+            let duration = try await asset.load(.duration)
+            return CMTimeGetSeconds(duration)
+        } catch {
+            print("❌ 获取音频时长失败: \(error)")
+            return 0
+        }
+    }
+
+    // MARK: - Comment Operations
+    func fetchComments(postId: String, limit: Int = 50, offset: Int = 0) async throws -> [Comment] {
+        let to = max(offset + limit - 1, offset)
+        let comments: [Comment] = try await client
+            .from("comments")
+            .select("""
+                *,
+                author:users!author_id(*)
+            """)
+            .eq("post_id", value: postId)
+            .order("created_at", ascending: false)
+            .range(from: offset, to: to)
+            .execute()
+            .value
+        return comments
+    }
+    
+    func createComment(postId: String, authorId: String, text: String, replyToId: String? = nil) async throws -> Comment {
+        struct CommentInsert: Encodable {
+            let post_id: String
+            let author_id: String
+            let text: String
+            let reply_to_id: String?
+        }
+        
+        let insertData = CommentInsert(
+            post_id: postId,
+            author_id: authorId,
+            text: text,
+            reply_to_id: replyToId
+        )
+        
+        let comment: Comment = try await client
+            .from("comments")
+            .insert(insertData)
+            .select("""
+                *,
+                author:users!author_id(*),
+                post:posts!post_id(*)
+            """)
+            .single()
+            .execute()
+            .value
+            
+        return comment
+    }
+    
+    func deleteComment(id: String, postId: String) async throws {
+        try await client
+            .from("comments")
+            .delete()
+            .eq("id", value: id)
+            .eq("post_id", value: postId)
+            .execute()
+    }
+    
+    func reportComment(reporterId: String, reportedUserId: String, postId: String, commentId: String, reason: String?) async throws {
+        struct ReportInsert: Encodable {
+            let reporter_id: String
+            let reported_user_id: String
+            let post_id: String
+            let comment_id: String
+            let reason: String?
+            let report_type: String
+        }
+        
+        let insertData = ReportInsert(
+            reporter_id: reporterId,
+            reported_user_id: reportedUserId,
+            post_id: postId,
+            comment_id: commentId,
+            reason: reason,
+            report_type: "comment"
+        )
+        
+        try await client
+            .from("reports")
+            .insert(insertData)
+            .execute()
+    }
+    
+    
+    // MARK: - Additional Methods
+    
+    func fetchUserCollections(userId: String) async throws -> [Post] {
+        let posts: [Post] = try await client
+            .from("post_collections")
+            .select("""
+                post:posts!post_id(
+                    *,
+                    author:users!author_id(*)
+                )
+            """)
+            .eq("user_id", value: userId)
+            .order("created_at", ascending: false)
+            .execute()
+            .value
+        
+        return posts
+    }
+    
+    func fetchDraftPosts(userId: String) async throws -> [Post] {
+        let posts: [Post] = try await client
+            .from("posts")
+            .select("""
+                *,
+                author:users!author_id(*)
+            """)
+            .eq("author_id", value: userId)
+            .eq("status", value: "draft")
+            .order("created_at", ascending: false)
+            .execute()
+            .value
+        
+        return posts
+    }
+    
+    func publishPost(id: String) async throws {
+        try await client
+            .from("posts")
+            .update(["status": "published"])
+            .eq("id", value: id)
+            .execute()
+    }
+    
+    
+    func fetchUserProfile(id: String) async throws -> User {
+        return try await fetchUser(id: id)
+    }
+    
+    func markNotificationAsRead(id: String) async throws {
+        try await client
+            .from("notifications")
+            .update(["is_read": true])
+            .eq("id", value: id)
+            .execute()
+    }
+    
+    func fetchTrendingPosts(limit: Int = 20) async throws -> [Post] {
+        return try await fetchPosts(limit: limit, offset: 0)
+    }
+    
+    func fetchProfileVisits(userId: String) async throws -> [ProfileVisit] {
+        let visits: [ProfileVisit] = try await client
+            .from("profile_visits")
+            .select("""
+                *,
+                visitor:users!visitor_id(*)
+            """)
+            .eq("profile_owner_id", value: userId)
+            .order("visited_at", ascending: false)
+            .execute()
+            .value
+        
+        return visits
+    }
+    
+    func searchUsers(query: String, limit: Int = 20) async throws -> [User] {
+        let users: [User] = try await client
+            .from("users")
+            .select()
+            .or("nickname.ilike.%\(query)%,mid.ilike.%\(query)%")
+            .limit(limit)
+            .execute()
+            .value
+        
+        return users
+    }
+    
+    func fetchMessages(conversationId: String, limit: Int = 50, offset: Int = 0) async throws -> [Message] {
+        let to = max(offset + limit - 1, offset)
+        
+        // Fetch messages without joins first
+        struct SimpleMessage: Decodable {
+            let id: String
+            let conversation_id: String
+            let sender_id: String
+            let receiver_id: String
+            let content: String
+            let message_type: String
+            let is_read: Bool
+            let created_at: Date
+            let updated_at: Date
+        }
+        
+        let simpleMessages: [SimpleMessage] = try await client
             .from("messages")
-            .update(MessageReadUpdate(is_read: true, updated_at: now))
-            .eq("id", value: messageId)
+            .select("*")
+            .eq("conversation_id", value: conversationId)
+            .order("created_at", ascending: false)
+            .range(from: offset, to: to)
             .execute()
-    }
-
-    // MARK: - Storage
-
-    func uploadChatMedia(
-        data: Data,
-        mime: String,
-        fileName: String? = nil,
-        folder: String,
-        bucket: String = "media",
-        isPublic: Bool = true
-    ) async throws -> String {
-        return try await uploadPostMedia(
-            data: data,
-            mime: mime,
-            fileName: fileName,
-            folder: folder,
-            bucket: bucket,
-            isPublic: isPublic
-        )
-    }
-
-    func uploadUserMedia(
-        data: Data,
-        mime: String,
-        fileName: String? = nil,
-        folder: String,
-        bucket: String = "media",
-        isPublic: Bool = true
-    ) async throws -> String {
-        return try await uploadPostMedia(
-            data: data,
-            mime: mime,
-            fileName: fileName,
-            folder: folder,
-            bucket: bucket,
-            isPublic: isPublic
-        )
-    }
-
-    func uploadPostMedia(
-        data: Data,
-        mime: String,
-        fileName: String? = nil,
-        folder: String,
-        bucket: String = "media",
-        isPublic: Bool = true
-    ) async throws -> String {
-        let name = fileName ?? UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        let sanitizedFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let path = "\(sanitizedFolder)/\(name)"
-
-        try await client.storage.from(bucket).upload(
-            path,
-            data: data,
-            options: .init(contentType: mime, upsert: true)
-        )
-
-        if isPublic {
-            let url: URL = try client.storage.from(bucket).getPublicURL(path: path)
-            return url.absoluteString
-        } else {
-            let signedURL: URL = try await client.storage.from(bucket).createSignedURL(path: path, expiresIn: 60 * 60 * 24)
-            return signedURL.absoluteString
+            .value
+        
+        // Convert to Message objects with sender info
+        var messages: [Message] = []
+        for simple in simpleMessages {
+            let sender = try? await fetchUser(id: simple.sender_id)
+            let message = Message(
+                id: simple.id,
+                conversationId: simple.conversation_id,
+                senderId: simple.sender_id,
+                receiverId: simple.receiver_id,
+                sender: sender,
+                content: simple.content,
+                messageType: MessageType(rawValue: simple.message_type) ?? .text,
+                isRead: simple.is_read,
+                createdAt: simple.created_at,
+                updatedAt: simple.updated_at
+            )
+            messages.append(message)
         }
+        
+        return messages
+    }
+    
+    func fetchRecommendedPosts(userId: String? = nil, limit: Int = 20, offset: Int = 0) async throws -> [Post] {
+        // For now, return trending posts as recommendations
+        return try await fetchPosts(limit: limit, offset: offset)
+    }
+    
+    func fetchFollowingPosts(userId: String, limit: Int = 20, offset: Int = 0) async throws -> [Post] {
+        // First get the user's following list
+        struct FollowRow: Codable {
+            let following_id: String
+        }
+        
+        let following: [FollowRow] = try await client
+            .from("follows")
+            .select("following_id")
+            .eq("follower_id", value: userId)
+            .execute()
+            .value
+        
+        guard !following.isEmpty else {
+            return [] // User is not following anyone
+        }
+        
+        let followingIds = following.map { $0.following_id }
+        let to = max(offset + limit - 1, offset)
+        
+        let posts: [Post] = try await client
+            .from("posts")
+            .select("""
+                *,
+                author:users!author_id(*)
+            """)
+            .in("author_id", values: followingIds)
+            .eq("status", value: "published")
+            .order("created_at", ascending: false)
+            .range(from: offset, to: to)
+            .execute()
+            .value
+        
+        return posts
     }
 
-    /// 直接使用 URLSession 上传以获取真实进度
-    /// - Parameters:
-    ///   - data: 媒体数据
-    ///   - mime: MIME 类型，如 image/jpeg 或 video/mp4
-    ///   - fileName: 文件名（可选，默认随机）
-    ///   - folder: 目标文件夹，如 "posts/<uid>/images"
-    ///   - bucket: 存储桶名，默认 "media"
-    ///   - isPublic: 是否返回公开URL
-    ///   - onProgress: 进度回调（0.0~1.0）
-    /// - Returns: 上传后 URL 字符串
-    func uploadPostMediaWithProgress(
-        data: Data,
-        mime: String,
-        fileName: String? = nil,
-        folder: String,
-        bucket: String = "media",
-        isPublic: Bool = true,
-        onProgress: ((Double) -> Void)?
-    ) async throws -> String {
-        let name = fileName ?? UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        let sanitizedFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let path = "\(sanitizedFolder)/\(name)"
+    // MARK: - Melomoment & Mutual Following
 
-        // 构造上传 URL：/storage/v1/object/{bucket}/{path}
-        let baseURL = URL(string: SupabaseConfig.url)!
-        let uploadURL = baseURL.appendingPathComponent("storage/v1/object/")
-            .appendingPathComponent(bucket)
-            .appendingPathComponent(path)
+    /// 获取与我互相关注的用户ID列表
+    func fetchMutualFollowingIds(userId: String) async throws -> [String] {
+        struct FRow: Codable { let following_id: String }
+        struct RRow: Codable { let follower_id: String }
 
-        var request = URLRequest(url: uploadURL)
-        request.httpMethod = "POST"
-        request.setValue(mime, forHTTPHeaderField: "Content-Type")
-        request.setValue("true", forHTTPHeaderField: "x-upsert")
-        // 认证：优先使用用户 token，回退到 anon key
-        let accessToken = client.auth.session.accessToken
-        let token = accessToken.isEmpty ? SupabaseConfig.anonKey : accessToken
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
+        // 我关注了谁
+        let following: [FRow] = try await client
+            .from("follows")
+            .select("following_id")
+            .eq("follower_id", value: userId)
+            .execute()
+            .value
 
-        // 自定义会话以监听上传进度
-        final class UploadDelegate: NSObject, URLSessionTaskDelegate {
-            let onProgress: ((Double) -> Void)?
-            init(onProgress: ((Double) -> Void)?) { self.onProgress = onProgress }
-            func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
-                guard totalBytesExpectedToSend > 0 else { return }
-                let progress = Double(totalBytesSent) / Double(totalBytesExpectedToSend)
-                onProgress?(min(max(progress, 0.0), 1.0))
-            }
-        }
+        // 谁关注了我
+        let followers: [RRow] = try await client
+            .from("follows")
+            .select("follower_id")
+            .eq("following_id", value: userId)
+            .execute()
+            .value
 
-        let delegate = UploadDelegate(onProgress: onProgress)
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
-
-        // 使用 continuation 包装异步上传
-        let (responseData, response) = try await session.upload(for: request, from: data)
-
-        // 关闭会话（避免持有 delegate）
-        session.invalidateAndCancel()
-
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            let message = String(data: responseData, encoding: .utf8) ?? "Upload failed"
-            // 显式抛出更友好的错误
-            if http.statusCode == 413 || message.lowercased().contains("maximum allowed size") {
-                throw NSError(domain: "Upload", code: 413, userInfo: [NSLocalizedDescriptionKey: "The object exceeded the maximum allowed size"])
-            }
-            throw NSError(domain: "Upload", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-
-        // 上传完毕补齐 100%
-        onProgress?(1.0)
-
-        if isPublic {
-            let url: URL = try client.storage.from(bucket).getPublicURL(path: path)
-            return url.absoluteString
-        } else {
-            let signedURL: URL = try await client.storage.from(bucket).createSignedURL(path: path, expiresIn: 60 * 60 * 24)
-            return signedURL.absoluteString
-        }
+        let followingIds = Set(following.map { $0.following_id })
+        let followerIds = Set(followers.map { $0.follower_id })
+        let mutual = followingIds.intersection(followerIds)
+        return Array(mutual)
     }
 
+    /// 拉取互关用户的 Melomoment（使用 posts 表，topics 包含 "melomoment"）
+    func fetchMelomoments(userId: String, limit: Int = 30) async throws -> [Post] {
+        let mutualIds = try await fetchMutualFollowingIds(userId: userId)
+        guard !mutualIds.isEmpty else { return [] }
+
+        // 拉取互关作者的已发布帖子
+        let posts: [Post] = try await client
+            .from("posts")
+            .select("""
+                *,
+                author:users!author_id(*)
+            """)
+            .in("author_id", values: mutualIds)
+            .eq("status", value: "published")
+            .order("created_at", ascending: false)
+            .limit(limit)
+            .execute()
+            .value
+
+        // 客户端过滤 topics 包含 "melomoment"
+        let filtered = posts.filter { $0.topics.contains("melomoment") }
+        return filtered
+    }
+
+    // MARK: - Moments (独立数据表)
+
+    /// 拉取互关好友的 Moments（使用 moments 表）
+    func fetchMoments(userId: String, limit: Int = 30) async throws -> [Moment] {
+        let mutualIds = try await fetchMutualFollowingIds(userId: userId)
+        guard !mutualIds.isEmpty else { return [] }
+
+        let moments: [Moment] = try await client
+            .from("moments")
+            .select(
+                """
+                *,
+                author:users!author_id(*)
+                """
+            )
+            .in("author_id", values: mutualIds)
+            .order("created_at", ascending: false)
+            .limit(limit)
+            .execute()
+            .value
+
+        return moments
+    }
+
+    /// 创建一个新的 Moment（插入 moments 表）
+    func createMoment(authorId: String, mediaURL: String, caption: String? = nil) async throws -> Moment {
+        struct MomentInsert: Encodable {
+            let author_id: String
+            let media_url: String
+            let caption: String?
+        }
+
+        let insertData = MomentInsert(author_id: authorId, media_url: mediaURL, caption: caption)
+
+        let moment: Moment = try await client
+            .from("moments")
+            .insert(insertData)
+            .select()
+            .single()
+            .execute()
+            .value
+        return moment
+    }
+}
+
+// MARK: - Helper Extensions
+
+extension Date {
+    func toISOString() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: self)
+    }
 }
 

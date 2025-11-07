@@ -12,7 +12,7 @@ struct SettingsView: View {
     @ObservedObject private var themeManager = ThemeManager.shared
     @ObservedObject private var languageManager = LanguageManager.shared
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
 
     @State private var showAlert = false
     @State private var alertMessage = ""
@@ -46,21 +46,13 @@ struct SettingsView: View {
                     Label(LocalizedStringKey("外观"), systemImage: "paintbrush")
                 }
 
-                // 隐私设置（暂时禁用，需要数据库支持）
+                // 隐私设置
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label {
-                            Text(LocalizedStringKey("隐私功能即将推出"))
-                                .foregroundStyle(.secondary)
-                        } icon: {
-                            Image(systemName: "lock.shield")
-                                .foregroundStyle(.blue)
-                        }
-                        Text(LocalizedStringKey("关注/粉丝列表隐私设置功能正在开发中"))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                    NavigationLink {
+                        PrivacySettingsView()
+                    } label: {
+                        Label(LocalizedStringKey("隐私设置"), systemImage: "lock.shield")
                     }
-                    .padding(.vertical, 4)
                 } header: {
                     Label(LocalizedStringKey("隐私"), systemImage: "hand.raised")
                 }
@@ -262,6 +254,47 @@ private struct NotificationSettingsView: View {
             enablePushNotifications = false
             print("❌ 请求通知权限失败: \(error)")
         }
+    }
+}
+
+// MARK: - Privacy Settings View
+
+private struct PrivacySettingsView: View {
+    @AppStorage("enable_read_receipts") private var enableReadReceipts = true
+    @AppStorage("show_online_status") private var showOnlineStatus = true
+    @AppStorage("allow_stranger_messages") private var allowStrangerMessages = true
+
+    var body: some View {
+        List {
+            Section {
+                Toggle("显示消息已读状态", isOn: $enableReadReceipts)
+            } header: {
+                Text("消息隐私")
+            } footer: {
+                Text("关闭后，对方将无法看到你是否已读他们的消息，同时你也无法看到对方的已读状态")
+                    .font(.caption)
+            }
+
+            Section {
+                Toggle("显示在线状态", isOn: $showOnlineStatus)
+            } header: {
+                Text("在线状态")
+            } footer: {
+                Text("关闭后，其他用户将无法看到你的在线状态")
+                    .font(.caption)
+            }
+
+            Section {
+                Toggle("允许陌生人发消息", isOn: $allowStrangerMessages)
+            } header: {
+                Text("消息接收")
+            } footer: {
+                Text("关闭后，只有你关注的人才能给你发送私信")
+                    .font(.caption)
+            }
+        }
+        .navigationTitle("隐私设置")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

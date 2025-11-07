@@ -12,7 +12,7 @@ struct UserProfileView: View {
     let user: User
 
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
 
     @State private var displayUser: User
     @State private var userPosts: [Post] = []
@@ -21,6 +21,7 @@ struct UserProfileView: View {
     @State private var isTogglingFollow = false
     @State private var showMessage = false
     @State private var showEditProfile = false
+    @State private var openConversationError: String?
 
     init(user: User) {
         self.user = user
@@ -51,7 +52,7 @@ struct UserProfileView: View {
                 // 用户信息区域
                 profileInfoView
                     .padding(.horizontal, 20)
-                    .padding(.top, 20)
+                    .padding(.top, 80)
                     .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     .animation(.spring(response: 0.4, dampingFraction: 0.8), value: displayUser.id)
 
@@ -106,14 +107,52 @@ struct UserProfileView: View {
         .sheet(isPresented: $showEditProfile) {
             EditProfileView(user: user)
         }
-        // 进入聊天：使用 ConversationView(conversation:otherUser:)
-        .sheet(isPresented: $showMessage) {
-            if let conv = pendingConversation, let other = pendingOtherUser {
-                NavigationStack { ConversationView(conversation: conv, otherUser: other) }
+        // 切换为页面推入式导航（非弹窗），并提供加载/错误占位
+        .navigationDestination(isPresented: Binding(
+            get: { showMessage },
+            set: { newValue in
+                showMessage = newValue
+                if !newValue { pendingConversation = nil; openConversationError = nil }
+            }
+        )) {
+            Group {
+                if let conv = pendingConversation, let other = pendingOtherUser {
+                    ConversationView(conversation: conv, otherUser: other)
+                } else if let err = openConversationError {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.orange)
+                        Text(err)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Button("返回") { showMessage = false }
+                            .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(.systemBackground))
+                } else {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("正在打开会话…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(.systemBackground))
+                }
             }
         }
         .task {
             await loadData()
+            await RealtimeCenter.shared.subscribeToUser(userId: user.id) { updated in
+                displayUser.followersCount = updated.followersCount
+                displayUser.followingCount = updated.followingCount
+                displayUser.likesCount = updated.likesCount
+            }
+        }
+        .onDisappear {
+            Task { await RealtimeCenter.shared.unsubscribeUser(userId: user.id) }
         }
         .onChange(of: selectedAvatarItem) { _, newValue in
             if let item = newValue {
@@ -295,9 +334,6 @@ struct UserProfileView: View {
 
     // MARK: - Action Buttons
 
-    @State private var messageButtonPressed = false
-    @State private var followButtonPressed = false
-
     private var actionButtonsView: some View {
         HStack(spacing: 12) {
             // 私信按钮
@@ -316,15 +352,9 @@ struct UserProfileView: View {
                 .padding(.vertical, 12)
                 .background(Color(.systemGray6))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(color: .black.opacity(messageButtonPressed ? 0 : 0.05), radius: messageButtonPressed ? 2 : 6, x: 0, y: messageButtonPressed ? 1 : 3)
+                .shadow(color: .black.opacity(0.05), radius: 6, x: 0, y: 3)
             }
-            .scaleEffect(messageButtonPressed ? 0.95 : 1.0)
-            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: messageButtonPressed)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in messageButtonPressed = true }
-                    .onEnded { _ in messageButtonPressed = false }
-            )
+            .buttonStyle(.plain)
 
             // 关注按钮
             Button {
@@ -355,20 +385,14 @@ struct UserProfileView: View {
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .shadow(
-                    color: isFollowing ? Color.clear : Color.blue.opacity(followButtonPressed ? 0.1 : 0.3),
-                    radius: followButtonPressed ? 4 : 10,
+                    color: isFollowing ? Color.clear : Color.blue.opacity(0.3),
+                    radius: 10,
                     x: 0,
-                    y: followButtonPressed ? 2 : 5
+                    y: 5
                 )
             }
-            .scaleEffect(followButtonPressed ? 0.95 : 1.0)
-            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: followButtonPressed)
+            .buttonStyle(.plain)
             .animation(.spring(response: 0.4, dampingFraction: 0.7), value: isFollowing)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in if !isTogglingFollow { followButtonPressed = true } }
-                    .onEnded { _ in followButtonPressed = false }
-            )
             .disabled(isTogglingFollow)
         }
     }
@@ -399,27 +423,30 @@ struct UserProfileView: View {
             } else {
                 LazyVStack(spacing: 16) {
                     ForEach(userPosts) { post in
-                        Group {
-                            if isOwnProfile {
-                                PostRowForProfile(post: post)
-                                    .padding(Edge.Set.horizontal, 16)
-                                    .contextMenu {
-                                        Button(role: .destructive) {
-                                            Task { await deletePost(post) }
-                                        } label: {
-                                            Label("删除", systemImage: "trash")
+                        NavigationLink(destination: PostDetailView(post: post)) {
+                            Group {
+                                if isOwnProfile {
+                                    PostRowForProfile(post: post)
+                                        .padding(Edge.Set.horizontal, 16)
+                                        .contextMenu {
+                                            Button(role: .destructive) {
+                                                Task { await deletePost(post) }
+                                            } label: {
+                                                Label("删除", systemImage: "trash")
+                                            }
+                                            Button {
+                                                Task { await hidePost(post) }
+                                            } label: {
+                                                Label("隐藏", systemImage: "eye.slash")
+                                            }
                                         }
-                                        Button {
-                                            Task { await hidePost(post) }
-                                        } label: {
-                                            Label("隐藏", systemImage: "eye.slash")
-                                        }
-                                    }
-                            } else {
-                                PostRowForProfile(post: post)
-                                    .padding(Edge.Set.horizontal, 16)
+                                } else {
+                                    PostRowForProfile(post: post)
+                                        .padding(Edge.Set.horizontal, 16)
+                                }
                             }
                         }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -431,6 +458,20 @@ struct UserProfileView: View {
     private func loadData() async {
         await loadFollowStatus()
         await loadUserPosts()
+        await recordVisit()
+    }
+
+    /// 记录访问（只在访问别人主页时）
+    private func recordVisit() async {
+        guard !isOwnProfile, let visitorId = authService.currentUser?.id else { return }
+
+        do {
+            try await supabaseService.recordUserProfileVisit(profileOwnerId: user.id, visitorId: visitorId)
+            print("✅ 已记录访问：\(user.nickname)")
+        } catch {
+            // 静默失败，不影响用户体验
+            print("⚠️ 记录访问失败: \(error)")
+        }
     }
 
     private func loadFollowStatus() async {
@@ -506,16 +547,36 @@ struct UserProfileView: View {
     // MARK: - Open Conversation
 
     private func openConversation() async {
-        guard let myId = authService.currentUser?.id else { return }
+        guard let myId = authService.currentUser?.id else { 
+            await MainActor.run {
+                openConversationError = "请先登录"
+            }
+            return 
+        }
+        
+        // 设置加载状态，避免白屏
+        await MainActor.run {
+            openConversationError = nil
+            showMessage = true
+        }
+        
         do {
             // 获取或创建会话
             let convId = try await supabaseService.getOrCreateConversation(user1Id: myId, user2Id: user.id)
             let conv = try await supabaseService.fetchConversation(id: convId, currentUserId: myId)
-            pendingConversation = conv
-            pendingOtherUser = user
-            showMessage = true
+            
+            await MainActor.run {
+                pendingConversation = conv
+                pendingOtherUser = user
+                openConversationError = nil
+            }
         } catch {
             print("打开会话失败: \(error)")
+            await MainActor.run {
+                // 显示错误提示，但保持在当前页面
+                openConversationError = "打开会话失败，请稍后重试"
+                showMessage = false // 关闭导航，避免白屏
+            }
         }
     }
 
@@ -575,6 +636,13 @@ struct UserProfileView: View {
     private func deletePost(_ post: Post) async {
         do {
             try await supabaseService.deletePost(id: post.id)
+            
+            NotificationCenter.default.post(
+                name: .postDeleted,
+                object: nil,
+                userInfo: ["postId": post.id]
+            )
+            
             userPosts.removeAll { $0.id == post.id }
         } catch {
             print("删除失败: \(error)")

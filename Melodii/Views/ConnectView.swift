@@ -9,7 +9,7 @@ import SwiftUI
 
 struct ConnectView: View {
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
 
     @State private var selectedFeatureIndex: Int?
 
@@ -304,7 +304,7 @@ private struct CircularFeatureCard: View {
 
 private struct MessagesListView: View {
     @ObservedObject private var authService = AuthService.shared
-    @ObservedObject private var supabaseService = SupabaseService.shared
+    @StateObject private var supabaseService = SupabaseService.shared
     @ObservedObject private var realtimeService = RealtimeService.shared
 
     @State private var conversations: [Conversation] = []

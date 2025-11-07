@@ -221,9 +221,13 @@ struct OnboardingView: View {
         Task {
             do {
                 // 更新用户信息
-                try await supabaseService.updateUserOnboarding(
+                let dateFormatter = ISO8601DateFormatter()
+                dateFormatter.formatOptions = [.withInternetDateTime]
+                let birthdayString = dateFormatter.string(from: birthday)
+                
+                try await supabaseService.updateUserOnboardingInfo(
                     userId: user.id,
-                    birthday: birthday,
+                    birthday: birthdayString,
                     interests: Array(selectedInterests)
                 )
 

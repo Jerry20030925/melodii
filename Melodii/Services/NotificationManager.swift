@@ -182,9 +182,8 @@ final class NotificationManager: NSObject, ObservableObject {
             _ = try await SupabaseService.shared.sendMessage(
                 conversationId: conversationId,
                 senderId: senderId,
-                receiverId: receiverId,
                 content: text,
-                messageType: .text
+                type: "text"
             )
             print("✅ 快速回复发送成功")
 

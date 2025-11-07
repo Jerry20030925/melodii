@@ -23,6 +23,10 @@ class RealtimeCenter: ObservableObject {
     // Realtime channels
     private var messagesChannel: RealtimeChannelV2?
     private var notificationsChannel: RealtimeChannelV2?
+    private var userChannels: [String: RealtimeChannelV2] = [:]
+
+    // In-memory callbacks for user updates
+    private var userUpdateHandlers: [String: (User) -> Void] = [:]
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -57,6 +61,14 @@ class RealtimeCenter: ObservableObject {
         // 取消订阅通知
         await notificationsChannel?.unsubscribe()
         notificationsChannel = nil
+
+        // 取消所有用户更新订阅
+        for (userId, channel) in userChannels {
+            print("🔄 Unsubscribe user channel: \(userId)")
+            await channel.unsubscribe()
+        }
+        userChannels.removeAll()
+        userUpdateHandlers.removeAll()
 
         // 重置状态
         newMessage = nil
@@ -197,6 +209,65 @@ class RealtimeCenter: ObservableObject {
             if unreadNotificationCount > 0 {
                 unreadNotificationCount -= 1
             }
+        }
+    }
+
+    // MARK: - User Updates (followers/following/likes and more)
+
+    /// 订阅指定用户的实时更新（用于主页统计信息实时刷新）
+    func subscribeToUser(userId: String, onUpdate: @escaping (User) -> Void) async {
+        // 如果已存在订阅，先取消以避免重复
+        if let existing = userChannels[userId] {
+            print("🔁 Resubscribing user updates: \(userId)")
+            await existing.unsubscribe()
+            userChannels.removeValue(forKey: userId)
+        }
+
+        let channel = client.realtimeV2.channel("users:\(userId)")
+
+        // 监听 users 表的更新事件（只过滤该用户）
+        let updates = channel.postgresChange(UpdateAction.self, schema: "public", table: "users", filter: "id=eq.\(userId)")
+
+        Task {
+            for await change in updates {
+                await self.handleUserUpdate(change.record, targetUserId: userId)
+            }
+        }
+
+        // 订阅频道
+        await channel.subscribe()
+        userChannels[userId] = channel
+        userUpdateHandlers[userId] = onUpdate
+
+        print("✅ Subscribed to user updates: \(userId)")
+    }
+
+    /// 取消订阅指定用户的实时更新
+    func unsubscribeUser(userId: String) async {
+        if let channel = userChannels[userId] {
+            await channel.unsubscribe()
+            userChannels.removeValue(forKey: userId)
+            userUpdateHandlers.removeValue(forKey: userId)
+            print("✅ Unsubscribed user updates: \(userId)")
+        }
+    }
+
+    /// 处理用户记录的更新，解析为 User 并调用回调
+    private func handleUserUpdate(_ record: [String: AnyJSON], targetUserId: String) async {
+        print("👤 User updated (\(targetUserId))")
+        do {
+            var dict: [String: Any] = [:]
+            for (key, value) in record { dict[key] = convertAnyJSON(value) }
+            let jsonData = try JSONSerialization.data(withJSONObject: dict)
+            let updatedUser = try JSONDecoder().decode(User.self, from: jsonData)
+
+            if let handler = userUpdateHandlers[targetUserId] {
+                await MainActor.run {
+                    handler(updatedUser)
+                }
+            }
+        } catch {
+            print("❌ Failed to parse user update: \(error)")
         }
     }
 

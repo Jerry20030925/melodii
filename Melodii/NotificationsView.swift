@@ -175,6 +175,8 @@ struct NotificationsView: View {
                     if unreadCenter.unreadNotifications > 0 {
                         unreadCenter.unreadNotifications -= 1
                     }
+                    // 更新应用badge
+                    await NotificationManager.shared.updateBadgeCount(unreadCenter.unreadMessages + unreadCenter.unreadNotifications)
                 }
             }
         } catch {
@@ -195,7 +197,11 @@ struct NotificationsView: View {
                 changed = true
             }
         }
-        if changed { unreadCenter.unreadNotifications = 0 }
+        if changed {
+            unreadCenter.unreadNotifications = 0
+            // 更新应用badge
+            await NotificationManager.shared.updateBadgeCount(unreadCenter.unreadMessages + unreadCenter.unreadNotifications)
+        }
     }
 
     // MARK: - Realtime

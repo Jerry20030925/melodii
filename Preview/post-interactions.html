@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>帖子交互栏预览</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #f6f7fb; }
+    .card { width: 360px; margin: 24px auto; background: #fff; border-radius: 18px; box-shadow: 0 6px 16px rgba(0,0,0,0.08); overflow: hidden; }
+    .header { padding: 16px; font-weight: 600; }
+    .image { height: 180px; background: linear-gradient(135deg,#b3c7ff,#f3d1ff); }
+    .actions { display: flex; padding: 12px 16px; gap: 24px; align-items: center; font-size: 14px; }
+    .btn { display: inline-flex; align-items: center; gap: 6px; color: #444; cursor: pointer; user-select: none; }
+    .btn .count { font-size: 12px; color: #666; font-weight: 500; }
+    .btn.heart { color: #e25555; }
+    .btn.bookmark { color: #3777ff; }
+    .btn.share { margin-left: auto; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">帖子标题预览</div>
+    <div class="image"></div>
+    <div class="actions">
+      <div class="btn heart" onclick="increment('like')">
+        ❤️ <span class="count" id="like-count">42</span>
+      </div>
+      <div class="btn" onclick="increment('comment')">
+        💬 <span class="count" id="comment-count">8</span>
+      </div>
+      <div class="btn bookmark" onclick="increment('collect')">
+        🔖 <span class="count" id="collect-count">15</span>
+      </div>
+      <div class="btn share" onclick="share()">⬆️ 分享</div>
+    </div>
+  </div>
+  <script>
+    function increment(key){
+      const el = document.getElementById(`${key}-count`);
+      el.textContent = String(parseInt(el.textContent, 10) + 1);
+    }
+    function share(){
+      alert('模拟系统分享面板');
+    }
+  </script>
+</body>
+</html>

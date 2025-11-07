@@ -2,7 +2,7 @@
 //  FullscreenMediaViewer.swift
 //  Melodii
 //
-//  全屏媒体预览：支持图片缩放、视频播放，左右滑动切换多媒体
+//  全屏媒体预览（Legacy 版本）：支持图片缩放、视频播放，左右滑动切换多媒体
 //
 
 import SwiftUI
@@ -10,7 +10,9 @@ import AVKit
 import AVFoundation
 import Combine
 
-struct FullscreenMediaViewer: View {
+// 为避免与项目中已有的 FullscreenMediaViewer 冲突，此处改名为 LegacyFullscreenMediaViewer。
+// 如需在项目中使用本版本，请显式引用该名称。
+struct LegacyFullscreenMediaViewer: View {
     let urls: [String]
     @Binding var isPresented: Bool
     @State var index: Int = 0
@@ -28,7 +30,7 @@ struct FullscreenMediaViewer: View {
                 ForEach(Array(urls.enumerated()), id: \.offset) { i, url in
                     Group {
                         if isVideo(url) {
-                            VideoPlayerView(urlString: url)
+                            FullscreenVideoPlayerView(urlString: url)
                                 .tag(i)
                         } else {
                             ZoomableAsyncImage(urlString: url)
@@ -143,13 +145,14 @@ private struct ZoomableAsyncImage: View {
     }
 }
 
-// 优化的视频播放器
-private struct VideoPlayerView: View {
+// 优化的视频播放器（重命名以避免与 CreateView.swift 中的 VideoPlayerView 冲突）
+private struct FullscreenVideoPlayerView: View {
     let urlString: String
     @State private var player: AVPlayer?
     @State private var isLoading = true
     @State private var hasError = false
     @State private var playerItem: AVPlayerItem?
+    @State private var cancellables = Set<AnyCancellable>()
 
     var body: some View {
         ZStack {
@@ -232,7 +235,7 @@ private struct VideoPlayerView: View {
             // 视频播放结束，可以添加重播逻辑
         }
         
-        // 监听播放器错误
+        // 监听播放器错误/状态
         item.publisher(for: \.status)
             .sink { status in
                 DispatchQueue.main.async {
@@ -274,6 +277,4 @@ private struct VideoPlayerView: View {
         NotificationCenter.default.removeObserver(self)
         cancellables.removeAll()
     }
-    
-    @State private var cancellables = Set<AnyCancellable>()
 }

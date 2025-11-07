@@ -10,5 +10,7 @@
 	<string>Melodii需要访问您的位置信息，以便在发布内容时添加位置标签，让您与附近的朋友分享心情。</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Melodii需要访问您的位置信息，以便在发布内容时添加位置标签。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Melodii需要访问您的麦克风，以便录制和发送语音消息。</string>
 </dict>
 </plist>

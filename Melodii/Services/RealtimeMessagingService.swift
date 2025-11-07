@@ -56,12 +56,20 @@ class RealtimeMessagingService: ObservableObject {
     
     private let client = SupabaseConfig.client
     private var subscriptions: Set<AnyCancellable> = []
-    private var messageSubscriptions: [String: Task<Void, Never>] = [:]
+    private var messageSubscriptions: [String: Task<Void, Error>] = [:]
     
-    // 消息缓存和状态管理
+    // 消息缓存和状态管理（添加大小限制防止内存泄漏）
     @Published var conversations: [String: [EnhancedMessage]] = [:]
     @Published var messageStatuses: [String: MessageStatus] = [:]
     @Published var typingUsers: [String: Set<String>] = [:] // conversationId -> userIds
+    
+    // 缓存限制配置
+    private let maxMessagesPerConversation = 100
+    private let maxCachedConversations = 10
+    private let maxMessageStatuses = 1000
+    
+    // 当前激活的对话（用于避免重复通知）
+    @Published var activeConversationId: String?
     
     // 性能优化
     private let messageQueue = DispatchQueue(label: "com.melodii.messaging", qos: .userInitiated)
@@ -72,6 +80,24 @@ class RealtimeMessagingService: ObservableObject {
         setupStatusUpdateTimer()
     }
     
+    // MARK: - 活跃对话管理
+    
+    func setActiveConversation(_ conversationId: String?) {
+        activeConversationId = conversationId
+        PushNotificationManager.shared.setActiveConversation(conversationId)
+        print("📱 设置活跃对话: \(conversationId ?? "nil")")
+    }
+    
+    func clearActiveConversation() {
+        activeConversationId = nil
+        PushNotificationManager.shared.clearActiveConversation()
+        print("📱 清除活跃对话")
+    }
+    
+    private func isInActiveConversation(_ conversationId: String) -> Bool {
+        return activeConversationId == conversationId
+    }
+    
     // MARK: - 订阅管理
     
     func subscribeToConversation(_ conversationId: String) async {
@@ -80,42 +106,67 @@ class RealtimeMessagingService: ObservableObject {
         
         // 创建新的订阅
         let task = Task { [weak self] in
-            guard let self else { return }
+            guard let self else { 
+                print("⚠️ RealtimeMessagingService已释放，取消订阅")
+                throw CancellationError()
+            }
+            
             let channel = self.client.realtimeV2.channel("messages:\(conversationId)")
             
-            // INSERT 监听
-            Task {
-                for await change in channel.postgresChange(InsertAction.self, schema: "public", table: "messages") {
+            // 使用TaskGroup管理子任务，确保正确清理
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                // INSERT 监听
+                group.addTask { [weak self] in
+                    guard let self else { return }
                     do {
-                        let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
-                        if message.conversationId == conversationId {
-                            await self.handleNewMessage(message)
+                        for await change in channel.postgresChange(InsertAction.self, schema: "public", table: "messages") {
+                            do {
+                                let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
+                                if message.conversationId == conversationId {
+                                    await self.handleNewMessage(message)
+                                }
+                            } catch {
+                                print("⚠️ decode message insert failed: \(error)")
+                            }
                         }
                     } catch {
-                        print("⚠️ decode message insert failed: \(error)")
+                        print("⚠️ message insert subscription failed: \(error)")
+                        throw error
                     }
                 }
-            }
-            
-            // UPDATE 监听
-            Task {
-                for await change in channel.postgresChange(UpdateAction.self, schema: "public", table: "messages") {
+                
+                // UPDATE 监听
+                group.addTask { [weak self] in
+                    guard let self else { return }
                     do {
-                        let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
-                        if message.conversationId == conversationId {
-                            await self.handleMessageUpdate(message)
+                        for await change in channel.postgresChange(UpdateAction.self, schema: "public", table: "messages") {
+                            do {
+                                let message = try change.decodeRecord(as: Message.self, decoder: JSONDecoder())
+                                if message.conversationId == conversationId {
+                                    await self.handleMessageUpdate(message)
+                                }
+                            } catch {
+                                print("⚠️ decode message update failed: \(error)")
+                            }
                         }
                     } catch {
-                        print("⚠️ decode message update failed: \(error)")
+                        print("⚠️ message update subscription failed: \(error)")
+                        throw error
                     }
                 }
-            }
-            
-            do {
-                try await channel.subscribeWithError()
-                print("✅ 已订阅会话: \(conversationId)")
-            } catch {
-                print("❌ 订阅会话失败: \(error)")
+                
+                // 订阅频道
+                do {
+                    try await channel.subscribeWithError()
+                    print("✅ 已订阅会话: \(conversationId)")
+                } catch {
+                    print("❌ 订阅会话失败: \(error)")
+                    group.cancelAll()
+                    throw error
+                }
+                
+                // 等待所有子任务完成或抛出错误
+                try await group.waitForAll()
             }
         }
         
@@ -170,9 +221,8 @@ class RealtimeMessagingService: ObservableObject {
             let serverMessage = try await SupabaseService.shared.sendMessage(
                 conversationId: conversationId,
                 senderId: senderId,
-                receiverId: receiverId,
                 content: content,
-                messageType: messageType
+                type: messageType.rawValue
             )
             
             // 转换为增强消息
@@ -273,38 +323,30 @@ class RealtimeMessagingService: ObservableObject {
         }
     }
 
-    /// 当收到新消息时，如果应用在后台则发送通知
+    /// 当收到新消息时发送通知（由PushNotificationManager处理条件判断）
     private func sendNotificationIfNeeded(for message: Message) async {
-        // 检查应用是否在后台
-        let appState = await UIApplication.shared.applicationState
-        guard appState != .active else {
-            print("📱 应用在前台，跳过通知")
-            return
+        // 获取发送者信息，如果没有则尝试从数据库获取
+        var sender = message.sender
+        
+        if sender == nil {
+            // 尝试从用户服务获取发送者信息
+            do {
+                sender = try await SupabaseService.shared.fetchUser(id: message.senderId)
+                print("📱 获取发送者信息成功: \(sender?.nickname ?? "未知")")
+            } catch {
+                print("❌ 获取发送者信息失败: \(error)")
+                // 创建一个临时用户对象
+                sender = User(id: message.senderId, nickname: "某人")
+            }
         }
-
-        // 获取发送者信息
-        let senderName = message.sender?.nickname ?? "某人"
-
-        // 根据消息类型生成通知内容
-        let notificationBody: String
-        switch message.messageType {
-        case .text:
-            notificationBody = message.content
-        case .image:
-            notificationBody = "[图片]"
-        case .voice:
-            notificationBody = "[语音消息]"
-        case .system:
-            notificationBody = message.content
+        
+        // 发送通知（PushNotificationManager会处理所有条件判断）
+        if let validSender = sender {
+            await PushNotificationManager.shared.handleNewMessage(message, from: validSender)
+            print("📱 已处理新消息通知: \(message.id)")
+        } else {
+            print("⚠️ 无法获取发送者信息，跳过通知")
         }
-
-        // 发送本地通知
-        await NotificationManager.shared.sendMessageNotification(
-            from: senderName,
-            message: notificationBody,
-            conversationId: message.conversationId,
-            senderId: message.senderId
-        )
     }
     
     private func handleMessageUpdate(_ message: Message) async {
@@ -327,7 +369,51 @@ class RealtimeMessagingService: ObservableObject {
     private func addMessageToConversation(_ message: EnhancedMessage) async {
         var messages = conversations[message.conversationId] ?? []
         messages.append(message)
+        
+        // 限制每个对话的消息数量，防止内存泄漏
+        if messages.count > maxMessagesPerConversation {
+            messages = Array(messages.suffix(maxMessagesPerConversation))
+        }
+        
         conversations[message.conversationId] = messages
+        
+        // 检查是否需要清理旧对话
+        await cleanupOldConversationsIfNeeded()
+    }
+    
+    /// 清理旧对话缓存，防止内存泄漏
+    private func cleanupOldConversationsIfNeeded() async {
+        guard conversations.count > maxCachedConversations else { return }
+        
+        // 保留最近使用的对话
+        let sortedConversations = conversations.sorted { lhs, rhs in
+            let lhsLatestTime = lhs.value.last?.createdAt ?? Date.distantPast
+            let rhsLatestTime = rhs.value.last?.createdAt ?? Date.distantPast
+            return lhsLatestTime > rhsLatestTime
+        }
+        
+        // 删除最旧的对话
+        let conversationsToRemove = sortedConversations.suffix(from: maxCachedConversations)
+        for (conversationId, _) in conversationsToRemove {
+            conversations.removeValue(forKey: conversationId)
+            typingUsers.removeValue(forKey: conversationId)
+            print("🧹 清理旧对话缓存: \(conversationId)")
+        }
+    }
+    
+    /// 清理消息状态缓存
+    private func cleanupMessageStatusesIfNeeded() async {
+        guard messageStatuses.count > maxMessageStatuses else { return }
+        
+        // 删除最旧的状态记录（保留最近的）
+        let sortedStatuses = messageStatuses.sorted { $0.key < $1.key }
+        let statusesToRemove = sortedStatuses.prefix(messageStatuses.count - maxMessageStatuses)
+        
+        for (messageId, _) in statusesToRemove {
+            messageStatuses.removeValue(forKey: messageId)
+        }
+        
+        print("🧹 清理消息状态缓存，删除 \(statusesToRemove.count) 条记录")
     }
     
     private func replaceOptimisticMessage(localId: String, with serverMessage: EnhancedMessage) async {
@@ -344,6 +430,9 @@ class RealtimeMessagingService: ObservableObject {
     private func updateMessageStatus(localId: String, status: MessageStatus) async {
         messageStatuses[localId] = status
         
+        // 检查是否需要清理状态缓存
+        await cleanupMessageStatusesIfNeeded()
+        
         // 更新对话中的消息状态
         for (conversationId, messages) in conversations {
             if let index = messages.firstIndex(where: { $0.id == localId || $0.localId == localId }) {
@@ -356,6 +445,7 @@ class RealtimeMessagingService: ObservableObject {
     }
     
     private func setupStatusUpdateTimer() {
+        statusUpdateTimer?.invalidate()
         statusUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.updatePendingMessageStatuses()
